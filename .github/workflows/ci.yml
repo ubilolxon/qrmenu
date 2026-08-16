@@ -37,6 +37,13 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
+      # Catches a .sql query edited without regenerating, which would otherwise
+      # only surface as a runtime error long after the change.
+      - name: sqlc output is up to date
+        run: |
+          go tool sqlc generate
+          git diff --exit-code internal/postgres/gen
+
   test:
     runs-on: ubuntu-latest
     services:

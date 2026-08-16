@@ -7,8 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/ubilolxon/qrmenu/internal/auth"
 	"github.com/ubilolxon/qrmenu/internal/config"
+	"github.com/ubilolxon/qrmenu/internal/domain"
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 )
 
@@ -23,7 +28,29 @@ func testRouter(t *testing.T, origins ...string) http.Handler {
 		Config:  config.Config{Env: "dev", HTTP: config.HTTP{AllowedOrigins: origins}},
 		Logger:  slog.New(slog.DiscardHandler),
 		Version: "test",
+		Issuer:  testIssuer(),
 	})
+}
+
+// The services are nil here on purpose: these tests cover routing, auth and
+// role enforcement, all of which must reject a request *before* any handler
+// runs. If one of them ever lets a request through, the nil service panics and
+// the test fails loudly instead of quietly passing.
+func testIssuer() *auth.Issuer {
+	return auth.NewIssuer([]byte("test-secret-that-is-long-enough-32b"), time.Minute, "qrmenu-test")
+}
+
+func tokenFor(t *testing.T, role domain.Role) string {
+	t.Helper()
+	token, _, err := testIssuer().IssueAccess(uuid.New(), uuid.New(), role)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	return token
+}
+
+func bearer(token string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + token}
 }
 
 func do(t *testing.T, h http.Handler, method, path string, headers map[string]string) *http.Response {
@@ -83,8 +110,10 @@ func TestErrorEnvelopeShape(t *testing.T) {
 		{"unknown route", http.MethodGet, "/nope", http.StatusNotFound, "NOT_FOUND"},
 		{"wrong method", http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "BAD_REQUEST"},
 		{"unbuilt public route", http.MethodGet, "/api/v1/public/x", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
-		{"unbuilt admin route", http.MethodGet, "/api/v1/admin/x", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
 		{"unbuilt staff route", http.MethodGet, "/api/v1/staff/x", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
+		// Admin is built, so an unknown path under it is a genuine 404 rather
+		// than a not-yet-implemented surface.
+		{"unknown admin route", http.MethodGet, "/api/v1/admin/x", http.StatusNotFound, "NOT_FOUND"},
 		{"unbuilt webhook", http.MethodGet, "/webhooks/stripe", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
 	}
 
@@ -174,6 +203,105 @@ func TestPanicBecomesInternalError(t *testing.T) {
 	// The panic value must never reach the client.
 	if body.Error.Message == "kaboom" {
 		t.Error("panic value leaked to the client")
+	}
+}
+
+// Every admin route except the auth entry points must reject an anonymous
+// caller. This is the test that catches a route accidentally added outside the
+// Authenticate group.
+func TestAdminRoutesRequireAuthentication(t *testing.T) {
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/me"},
+		{http.MethodGet, "/api/v1/admin/restaurants/"},
+		{http.MethodPost, "/api/v1/admin/restaurants/"},
+		{http.MethodGet, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
+		{http.MethodPatch, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
+		{http.MethodDelete, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
+	}
+
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			resp := do(t, testRouter(t), rt.method, rt.path, nil)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestRejectsMalformedAndForgedTokens(t *testing.T) {
+	forged := auth.NewIssuer([]byte("a-different-secret-of-sufficient-len"), time.Minute, "qrmenu-test")
+	forgedToken, _, err := forged.IssueAccess(uuid.New(), uuid.New(), domain.RoleOwner)
+	if err != nil {
+		t.Fatalf("issue forged token: %v", err)
+	}
+
+	tests := map[string]map[string]string{
+		"garbage token":         bearer("not-a-jwt"),
+		"empty bearer":          {"Authorization": "Bearer "},
+		"wrong scheme":          {"Authorization": "Basic " + tokenFor(t, domain.RoleOwner)},
+		"signed with wrong key": bearer(forgedToken),
+	}
+
+	for name, headers := range tests {
+		t.Run(name, func(t *testing.T) {
+			resp := do(t, testRouter(t), http.MethodGet, "/api/v1/admin/me", headers)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// An expired token gets its own code so the SPA refreshes instead of bouncing
+// the user to the login screen.
+func TestExpiredTokenIsDistinguishable(t *testing.T) {
+	expired := auth.NewIssuer([]byte("test-secret-that-is-long-enough-32b"), -time.Minute, "qrmenu-test")
+	token, _, err := expired.IssueAccess(uuid.New(), uuid.New(), domain.RoleOwner)
+	if err != nil {
+		t.Fatalf("issue expired token: %v", err)
+	}
+
+	resp := do(t, testRouter(t), http.MethodGet, "/api/v1/admin/me", bearer(token))
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	decode(t, resp, &body)
+	if body.Error.Code != "TOKEN_EXPIRED" {
+		t.Errorf("error.code = %q, want TOKEN_EXPIRED", body.Error.Code)
+	}
+}
+
+// Roles are an explicit allow-list per route, so a valid token for the wrong
+// job is a 403 rather than access.
+func TestRoleEnforcement(t *testing.T) {
+	tests := []struct {
+		name   string
+		role   domain.Role
+		method string
+		path   string
+		want   int
+	}{
+		{"waiter cannot list restaurants", domain.RoleWaiter, http.MethodGet, "/api/v1/admin/restaurants/", http.StatusForbidden},
+		{"kitchen cannot list restaurants", domain.RoleKitchen, http.MethodGet, "/api/v1/admin/restaurants/", http.StatusForbidden},
+		{"manager cannot create a restaurant", domain.RoleManager, http.MethodPost, "/api/v1/admin/restaurants/", http.StatusForbidden},
+		{"manager cannot delete a restaurant", domain.RoleManager, http.MethodDelete, "/api/v1/admin/restaurants/" + uuid.NewString() + "/", http.StatusForbidden},
+		{"waiter cannot delete a restaurant", domain.RoleWaiter, http.MethodDelete, "/api/v1/admin/restaurants/" + uuid.NewString() + "/", http.StatusForbidden},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, testRouter(t), tc.method, tc.path, bearer(tokenFor(t, tc.role)))
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
 	}
 }
 

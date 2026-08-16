@@ -10,10 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/ubilolxon/qrmenu/internal/auth"
 	"github.com/ubilolxon/qrmenu/internal/config"
+	"github.com/ubilolxon/qrmenu/internal/domain"
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/service"
 )
 
 type Deps struct {
@@ -22,6 +25,10 @@ type Deps struct {
 	DB      *pgxpool.Pool
 	Redis   *redis.Client
 	Version string
+
+	Issuer      *auth.Issuer
+	AuthSvc     *service.Auth
+	Restaurants *service.Restaurant
 }
 
 // NewRouter builds the full route tree.
@@ -49,9 +56,8 @@ func NewRouter(d Deps) http.Handler {
 			r.NotFound(notImplemented)
 		})
 
-		// Restaurant owners and managers in the SPA. JWT + tenant scope. (Phase 1)
 		r.Route("/admin", func(r chi.Router) {
-			r.NotFound(notImplemented)
+			d.mountAdmin(r)
 		})
 
 		// Waiter and kitchen devices, including the SSE stream. (Phase 5)
@@ -76,6 +82,49 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	return r
+}
+
+// mountAdmin builds the authenticated management API.
+//
+// Everything except the four auth entry points sits inside the Authenticate
+// group, so a route added to the wrong block fails closed — an unauthenticated
+// request reaches no handler at all rather than one that forgot to check.
+func (d Deps) mountAdmin(r chi.Router) {
+	authHandler := handler.NewAuth(d.AuthSvc, d.Config.Auth)
+	restaurants := handler.NewRestaurant(d.Restaurants)
+
+	// Unauthenticated: these are how a caller obtains credentials in the first
+	// place. Refresh and logout authenticate with the HttpOnly cookie.
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/register", authHandler.Register)
+		r.Post("/login", authHandler.Login)
+		r.Post("/refresh", authHandler.Refresh)
+		r.Post("/logout", authHandler.Logout)
+	})
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Authenticate(d.Issuer))
+
+		r.Get("/me", authHandler.Me)
+
+		r.Route("/restaurants", func(r chi.Router) {
+			// Managers run the menus; owners additionally control how many
+			// restaurants exist, since that is what a plan is billed on.
+			r.With(middleware.RequireRole(domain.RoleOwner, domain.RoleManager)).
+				Get("/", restaurants.List)
+			r.With(middleware.RequireRole(domain.RoleOwner)).
+				Post("/", restaurants.Create)
+
+			r.Route("/{id}", func(r chi.Router) {
+				r.With(middleware.RequireRole(domain.RoleOwner, domain.RoleManager)).
+					Get("/", restaurants.Get)
+				r.With(middleware.RequireRole(domain.RoleOwner, domain.RoleManager)).
+					Patch("/", restaurants.Update)
+				r.With(middleware.RequireRole(domain.RoleOwner)).
+					Delete("/", restaurants.Delete)
+			})
+		})
+	})
 }
 
 func notImplemented(w http.ResponseWriter, _ *http.Request) {

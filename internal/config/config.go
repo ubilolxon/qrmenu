@@ -5,6 +5,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,6 +21,21 @@ type Config struct {
 	DB       DB
 	Redis    Redis
 	Storage  Storage
+	Auth     Auth
+}
+
+type Auth struct {
+	JWTSecret  []byte
+	Issuer     string
+	AccessTTL  time.Duration
+	RefreshTTL time.Duration
+
+	// Refresh cookie attributes. The cookie is HttpOnly and SameSite=Strict
+	// unconditionally; only these vary by environment.
+	CookieName   string
+	CookieDomain string
+	CookiePath   string
+	CookieSecure bool
 }
 
 type HTTP struct {
@@ -95,12 +111,33 @@ func Load() (Config, error) {
 			UseSSL:    l.boolv("S3_USE_SSL", false),
 			PublicURL: l.str("S3_PUBLIC_URL", "http://localhost:9000/qrmenu"),
 		},
+		Auth: Auth{
+			Issuer:     l.str("AUTH_ISSUER", "qrmenu"),
+			AccessTTL:  l.dur("AUTH_ACCESS_TTL", 15*time.Minute),
+			RefreshTTL: l.dur("AUTH_REFRESH_TTL", 30*24*time.Hour),
+
+			CookieName:   l.str("AUTH_COOKIE_NAME", "qrmenu_refresh"),
+			CookieDomain: l.str("AUTH_COOKIE_DOMAIN", ""),
+			CookiePath:   l.str("AUTH_COOKIE_PATH", "/api/v1/admin/auth"),
+		},
 	}
 
 	switch cfg.Env {
 	case "dev", "staging", "prod":
 	default:
 		l.errf("APP_ENV must be one of dev|staging|prod, got %q", cfg.Env)
+	}
+
+	cfg.Auth.JWTSecret = l.jwtSecret(cfg.IsDev())
+	// Secure cookies require HTTPS, which a local dev server does not have.
+	cfg.Auth.CookieSecure = l.boolv("AUTH_COOKIE_SECURE", !cfg.IsDev())
+
+	if cfg.Auth.AccessTTL > time.Hour {
+		l.errf("AUTH_ACCESS_TTL is %v; access tokens are not revocable, so keep them short", cfg.Auth.AccessTTL)
+	}
+	if cfg.Auth.RefreshTTL <= cfg.Auth.AccessTTL {
+		l.errf("AUTH_REFRESH_TTL (%v) must be longer than AUTH_ACCESS_TTL (%v)",
+			cfg.Auth.RefreshTTL, cfg.Auth.AccessTTL)
 	}
 
 	// A wildcard CORS origin combined with credentialed refresh cookies would
@@ -131,6 +168,40 @@ func (l *loader) err() error {
 		return nil
 	}
 	return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(l.problems, "\n  - "))
+}
+
+// MinJWTSecretLen matches the HMAC-SHA256 block size. A shorter secret weakens
+// the signature; a longer one is hashed down to it anyway.
+const MinJWTSecretLen = 32
+
+// jwtSecret loads the signing key.
+//
+// Outside dev it is required and length-checked. In dev a missing key is
+// generated at random so a fresh checkout runs with no setup — the cost is that
+// every restart invalidates issued tokens, which is why .env.example ships a
+// fixed value.
+func (l *loader) jwtSecret(isDev bool) []byte {
+	raw := os.Getenv("AUTH_JWT_SECRET")
+
+	if raw == "" {
+		if !isDev {
+			l.errf("AUTH_JWT_SECRET is required (at least %d characters) outside dev", MinJWTSecretLen)
+			return nil
+		}
+		secret := make([]byte, MinJWTSecretLen)
+		if _, err := rand.Read(secret); err != nil {
+			l.errf("could not generate a development AUTH_JWT_SECRET: %v", err)
+			return nil
+		}
+		slog.Warn("AUTH_JWT_SECRET is unset; generated a random one for this run. " +
+			"Access tokens will stop working when the process restarts.")
+		return secret
+	}
+
+	if len(raw) < MinJWTSecretLen {
+		l.errf("AUTH_JWT_SECRET is %d characters, minimum is %d", len(raw), MinJWTSecretLen)
+	}
+	return []byte(raw)
 }
 
 func (l *loader) str(key, def string) string {

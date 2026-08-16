@@ -9,14 +9,35 @@ sql:
         out: internal/postgres/gen
         sql_package: pgx/v5
 
-        # Map Postgres types onto types that carry their meaning in Go.
         emit_json_tags: false          # DTOs own the wire shape, not the DB layer
         emit_pointers_for_null_types: true
         emit_prepared_queries: false
-        emit_interface: true           # lets services take a Querier, not a concrete pool
+        emit_interface: true           # services take a Querier, not a concrete pool
         emit_empty_slices: true        # a query with no rows returns [], never nil
 
         overrides:
+          # pgtype.UUID is awkward to pass around; google/uuid is a plain
+          # [16]byte with the parsing and formatting already written.
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+
+          # citext is case-insensitive at the database level, which is exactly
+          # what email and slug want. In Go it is just a string.
+          - db_type: "citext"
+            go_type: "string"
+
+          # The pgx driver defaults timestamptz to pgtype.Timestamptz even when
+          # the column is NOT NULL, which would push a driver type into every
+          # domain struct. Plain time.Time, and a pointer only where the column
+          # really is nullable.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
           # jsonb translation fields are handled by internal/i18n, which knows
           # the locale-fallback rules. Keeping them as raw bytes here stops sqlc
           # from guessing at a shape.

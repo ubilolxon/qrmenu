@@ -12,10 +12,12 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/ubilolxon/qrmenu/internal/auth"
 	"github.com/ubilolxon/qrmenu/internal/cache"
 	"github.com/ubilolxon/qrmenu/internal/config"
 	apphttp "github.com/ubilolxon/qrmenu/internal/http"
 	"github.com/ubilolxon/qrmenu/internal/postgres"
+	"github.com/ubilolxon/qrmenu/internal/service"
 )
 
 func main() {
@@ -72,12 +74,23 @@ func run() error {
 		logger.Info("connected to redis", slog.String("addr", cfg.Redis.Addr))
 	}
 
+	store := postgres.NewStore(db)
+	issuer := auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTTL, cfg.Auth.Issuer)
+
+	authSvc, err := service.NewAuth(store, issuer, cfg.Auth.RefreshTTL, logger)
+	if err != nil {
+		return fmt.Errorf("build auth service: %w", err)
+	}
+
 	router := apphttp.NewRouter(apphttp.Deps{
-		Config:  cfg,
-		Logger:  logger,
-		DB:      db,
-		Redis:   rdb,
-		Version: version,
+		Config:      cfg,
+		Logger:      logger,
+		DB:          db,
+		Redis:       rdb,
+		Version:     version,
+		Issuer:      issuer,
+		AuthSvc:     authSvc,
+		Restaurants: service.NewRestaurant(store),
 	})
 
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)

@@ -111,7 +111,7 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.Int("status", rec.status),
 				slog.Int("bytes", rec.bytes),
 				slog.Duration("took", time.Since(start).Round(time.Microsecond)),
-				slog.String("ip", clientIP(r)),
+				slog.String("ip", ClientIP(r)),
 			)
 		})
 	}
@@ -121,10 +121,10 @@ func isProbe(path string) bool {
 	return path == "/healthz" || path == "/readyz"
 }
 
-// clientIP prefers the proxy-provided address. This is only ever used for logs
+// ClientIP prefers the proxy-provided address. This is only ever used for logs
 // and rate limiting; both headers are trivially spoofable if the service is
 // exposed without a trusted proxy in front of it.
-func clientIP(r *http.Request) string {
+func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if first, _, found := strings.Cut(xff, ","); found {
 			return strings.TrimSpace(first)
