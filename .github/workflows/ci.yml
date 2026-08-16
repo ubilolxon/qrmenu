@@ -18,8 +18,16 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      # Block scalar, not a plain one: a plain YAML scalar may not contain
+      # ": ", which the message below does.
       - name: gofmt
-        run: test -z "$(gofmt -l .)" || (gofmt -l . && echo 'run: gofmt -w .' && exit 1)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            echo "these files need gofmt -w ."
+            exit 1
+          fi
 
       - name: vet
         run: go vet ./...
