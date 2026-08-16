@@ -1,0 +1,80 @@
+# Local development dependencies.
+#
+# Postgres is published on 5433, not 5432, so it cannot collide with a
+# Postgres already installed on the host.
+#
+#   make up        start everything
+#   make migrate   apply migrations
+#   make run       run the API on the host against these services
+
+name: qrmenu
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: qrmenu
+      POSTGRES_PASSWORD: qrmenu
+      POSTGRES_DB: qrmenu
+      # Faster and deterministic for tests; never use these settings in prod.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qrmenu -d qrmenu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: creates the bucket and makes the image prefix publicly readable,
+  # matching how a CDN-fronted bucket behaves in production.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/qrmenu &&
+      mc anonymous set download local/qrmenu &&
+      echo 'bucket qrmenu ready'
+      "
+    restart: "no"
+
+volumes:
+  pgdata:
+  miniodata:

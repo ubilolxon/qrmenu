@@ -1,0 +1,21 @@
+# Secrets and local overrides
+.env
+.env.local
+*.pem
+*.key
+
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+
+# SPA build artifacts
+/web/node_modules/
+/web/dist/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store

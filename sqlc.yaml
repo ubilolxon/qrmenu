@@ -1,0 +1,24 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/postgres/queries
+    gen:
+      go:
+        package: gen
+        out: internal/postgres/gen
+        sql_package: pgx/v5
+
+        # Map Postgres types onto types that carry their meaning in Go.
+        emit_json_tags: false          # DTOs own the wire shape, not the DB layer
+        emit_pointers_for_null_types: true
+        emit_prepared_queries: false
+        emit_interface: true           # lets services take a Querier, not a concrete pool
+        emit_empty_slices: true        # a query with no rows returns [], never nil
+
+        overrides:
+          # jsonb translation fields are handled by internal/i18n, which knows
+          # the locale-fallback rules. Keeping them as raw bytes here stops sqlc
+          # from guessing at a shape.
+          - db_type: "jsonb"
+            go_type: "encoding/json.RawMessage"

@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && echo 'run: gofmt -w .' && exit 1)
+
+      - name: vet
+        run: go vet ./...
+
+      - name: tidy is committed
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: qrmenu
+          POSTGRES_PASSWORD: qrmenu
+          POSTGRES_DB: qrmenu
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U qrmenu -d qrmenu"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://qrmenu:qrmenu@localhost:5432/qrmenu?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Running migrations in CI is itself a test: it catches a migration that
+      # only works against a database that already has the previous schema.
+      - name: migrate
+        run: go run ./cmd/migrate up
+
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage
+        run: go tool cover -func=coverage.out | tail -1
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [verify, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" ./cmd/...
+
+      - name: docker image builds
+        run: docker build -f deploy/Dockerfile -t qrmenu-api .
