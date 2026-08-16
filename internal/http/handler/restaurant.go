@@ -156,7 +156,7 @@ func (h Restaurant) Create(w http.ResponseWriter, r *http.Request) {
 func (h Restaurant) Get(w http.ResponseWriter, r *http.Request) {
 	identity := middleware.MustIdentity(r.Context())
 
-	id, err := PathUUID(r, "id", chi.URLParam(r, "id"))
+	id, err := PathUUID(r, "restaurant_id", chi.URLParam(r, "restaurantID"))
 	if err != nil {
 		RenderError(w, r, err)
 		return
@@ -173,7 +173,7 @@ func (h Restaurant) Get(w http.ResponseWriter, r *http.Request) {
 func (h Restaurant) Update(w http.ResponseWriter, r *http.Request) {
 	identity := middleware.MustIdentity(r.Context())
 
-	id, err := PathUUID(r, "id", chi.URLParam(r, "id"))
+	id, err := PathUUID(r, "restaurant_id", chi.URLParam(r, "restaurantID"))
 	if err != nil {
 		RenderError(w, r, err)
 		return
@@ -208,7 +208,7 @@ func (h Restaurant) Update(w http.ResponseWriter, r *http.Request) {
 func (h Restaurant) Delete(w http.ResponseWriter, r *http.Request) {
 	identity := middleware.MustIdentity(r.Context())
 
-	id, err := PathUUID(r, "id", chi.URLParam(r, "id"))
+	id, err := PathUUID(r, "restaurant_id", chi.URLParam(r, "restaurantID"))
 	if err != nil {
 		RenderError(w, r, err)
 		return

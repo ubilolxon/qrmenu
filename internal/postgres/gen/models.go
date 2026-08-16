@@ -11,6 +11,86 @@ import (
 	"github.com/google/uuid"
 )
 
+type Category struct {
+	ID           uuid.UUID
+	RestaurantID uuid.UUID
+	MenuID       uuid.UUID
+	Name         json.RawMessage
+	Description  json.RawMessage
+	IsActive     bool
+	SortOrder    int32
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type Item struct {
+	ID           uuid.UUID
+	RestaurantID uuid.UUID
+	CategoryID   uuid.UUID
+	Name         json.RawMessage
+	Description  json.RawMessage
+	PriceMinor   int64
+	IsAvailable  bool
+	SortOrder    int32
+	Tags         []string
+	Allergens    []string
+	Calories     *int32
+	PrepMinutes  *int32
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type ItemVariant struct {
+	ID              uuid.UUID
+	RestaurantID    uuid.UUID
+	ItemID          uuid.UUID
+	Name            json.RawMessage
+	PriceDeltaMinor int64
+	IsDefault       bool
+	IsAvailable     bool
+	SortOrder       int32
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type Menu struct {
+	ID               uuid.UUID
+	RestaurantID     uuid.UUID
+	Name             json.RawMessage
+	Description      json.RawMessage
+	IsActive         bool
+	SortOrder        int32
+	AvailableFromMin *int32
+	AvailableToMin   *int32
+	Days             []int16
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type Modifier struct {
+	ID              uuid.UUID
+	RestaurantID    uuid.UUID
+	GroupID         uuid.UUID
+	Name            json.RawMessage
+	PriceDeltaMinor int64
+	IsAvailable     bool
+	SortOrder       int32
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type ModifierGroup struct {
+	ID           uuid.UUID
+	RestaurantID uuid.UUID
+	ItemID       uuid.UUID
+	Name         json.RawMessage
+	MinSelect    int32
+	MaxSelect    int32
+	SortOrder    int32
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type RefreshToken struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID

@@ -82,6 +82,53 @@ Admin surface (`/api/v1/admin`). Public and staff surfaces arrive in Phases 3 an
 | PATCH | `/restaurants/{id}` | bearer | owner, manager |
 | DELETE | `/restaurants/{id}` | bearer | owner |
 
+Menu tree, all under `/restaurants/{restaurantID}` and all requiring owner or
+manager, except where noted.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET POST | `/menus` | |
+| PUT | `/menus/reorder` | array order is the new order |
+| GET PATCH DELETE | `/menus/{menuID}` | |
+| GET POST | `/menus/{menuID}/categories` | |
+| PUT | `/categories/reorder` | |
+| GET PATCH DELETE | `/categories/{categoryID}` | |
+| GET POST | `/categories/{categoryID}/items` | |
+| PUT | `/items/reorder` | |
+| GET PATCH DELETE | `/items/{itemID}` | |
+| PUT | `/items/{itemID}/availability` | **also kitchen and waiter** |
+| GET POST | `/items/{itemID}/variants` | |
+| PATCH DELETE | `/variants/{variantID}` | |
+| GET POST | `/items/{itemID}/modifier-groups` | |
+| PATCH DELETE | `/modifier-groups/{groupID}` | |
+| GET POST | `/modifier-groups/{groupID}/modifiers` | |
+| PATCH DELETE | `/modifiers/{modifierID}` | |
+
+Marking a dish sold out is the one menu write that happens mid-service, so
+kitchen and waiting staff can do it without being able to change anything else.
+
+## Menu data model
+
+Every table in the tree carries `restaurant_id`, even though it could be reached
+by following parent links. That keeps scoping to a single predicate instead of a
+four-table join, and lets Phase 3 load a whole menu in a handful of indexed
+scans.
+
+The usual risk of that denormalisation — the copy drifting from the parent —
+cannot happen here. Each child references its parent with a **composite foreign
+key** on `(parent_id, restaurant_id)`, so Postgres itself refuses to let a
+category belong to a menu from a different restaurant. The redundancy is
+enforced, not merely intended.
+
+Prices are `bigint` minor units (tiyin, cents); the currency lives on the
+restaurant. Menu availability windows are minutes from midnight, and a window
+may wrap midnight — a 22:00–02:00 late menu has `from > to`, and the hours after
+midnight belong to the day the window opened.
+
+Any menu write bumps `restaurants.menu_version` **in the same transaction**.
+That counter is the public cache key suffix, so a write and its cache
+invalidation commit together or not at all.
+
 ## Auth
 
 Access tokens are JWTs valid for 15 minutes, held in memory by the SPA. Refresh
@@ -118,5 +165,7 @@ Fakes cannot catch a missing `WHERE tenant_id`; only a real database can.
 - **Phase 0** — skeleton, config, migrations, health, compose, CI.
 - **Phase 1** — tenants, users, argon2id passwords, JWT + rotating refresh
   tokens, roles, restaurants CRUD, tenant-isolation suite.
+- **Phase 2** — menus, categories, items, variants, modifier groups and
+  modifiers; bulk reorder; availability toggle; translated fields throughout.
 - **Phase 3 is the milestone to aim at**: public menu endpoint + QR generation
   is the first thing you can demo on a phone.

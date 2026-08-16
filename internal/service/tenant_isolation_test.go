@@ -36,6 +36,7 @@ type harness struct {
 	pool        *pgxpool.Pool
 	authSvc     *service.Auth
 	restaurants *service.Restaurant
+	menus       *service.Menu
 }
 
 func newHarness(t *testing.T) *harness {
@@ -65,7 +66,12 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("build auth service: %v", err)
 	}
 
-	return &harness{pool: pool, authSvc: authSvc, restaurants: service.NewRestaurant(store)}
+	return &harness{
+		pool:        pool,
+		authSvc:     authSvc,
+		restaurants: service.NewRestaurant(store),
+		menus:       service.NewMenu(store),
+	}
 }
 
 // tenant registers a fresh account and returns its owner session. Every test

@@ -29,6 +29,7 @@ type Deps struct {
 	Issuer      *auth.Issuer
 	AuthSvc     *service.Auth
 	Restaurants *service.Restaurant
+	Menus       *service.Menu
 }
 
 // NewRouter builds the full route tree.
@@ -115,15 +116,97 @@ func (d Deps) mountAdmin(r chi.Router) {
 			r.With(middleware.RequireRole(domain.RoleOwner)).
 				Post("/", restaurants.Create)
 
-			r.Route("/{id}", func(r chi.Router) {
+			r.Route("/{restaurantID}", func(r chi.Router) {
 				r.With(middleware.RequireRole(domain.RoleOwner, domain.RoleManager)).
 					Get("/", restaurants.Get)
 				r.With(middleware.RequireRole(domain.RoleOwner, domain.RoleManager)).
 					Patch("/", restaurants.Update)
 				r.With(middleware.RequireRole(domain.RoleOwner)).
 					Delete("/", restaurants.Delete)
+
+				mountMenu(r, handler.NewMenu(d.Menus))
 			})
 		})
+	})
+}
+
+// mountMenu hangs the whole menu tree under a restaurant.
+//
+// Collections that need a parent are nested under it (a category belongs to a
+// menu); everything else is addressed directly by id under the restaurant,
+// because a category id is already unique and forcing callers to remember the
+// full ancestor chain buys nothing.
+func mountMenu(r chi.Router, h handler.Menu) {
+	// Menu editing is a manager's job. Owners can do it too, since owner is not
+	// a superset by default — every route lists the roles it accepts.
+	editors := middleware.RequireRole(domain.RoleOwner, domain.RoleManager)
+
+	// Marking a dish sold out happens mid-service, so kitchen and waiting staff
+	// can do it without being able to change prices or anything else.
+	stock := middleware.RequireRole(
+		domain.RoleOwner, domain.RoleManager, domain.RoleKitchen, domain.RoleWaiter)
+
+	r.Route("/menus", func(r chi.Router) {
+		r.With(editors).Get("/", h.ListMenus)
+		r.With(editors).Post("/", h.CreateMenu)
+		// Registered before /{menuID} so "reorder" is not read as an id.
+		r.With(editors).Put("/reorder", h.ReorderMenus)
+
+		r.Route("/{menuID}", func(r chi.Router) {
+			r.With(editors).Get("/", h.GetMenu)
+			r.With(editors).Patch("/", h.UpdateMenu)
+			r.With(editors).Delete("/", h.DeleteMenu)
+
+			r.With(editors).Get("/categories", h.ListCategories)
+			r.With(editors).Post("/categories", h.CreateCategory)
+		})
+	})
+
+	r.Route("/categories", func(r chi.Router) {
+		r.With(editors).Put("/reorder", h.ReorderCategories)
+
+		r.Route("/{categoryID}", func(r chi.Router) {
+			r.With(editors).Get("/", h.GetCategory)
+			r.With(editors).Patch("/", h.UpdateCategory)
+			r.With(editors).Delete("/", h.DeleteCategory)
+
+			r.With(editors).Get("/items", h.ListItems)
+			r.With(editors).Post("/items", h.CreateItem)
+		})
+	})
+
+	r.Route("/items", func(r chi.Router) {
+		r.With(editors).Put("/reorder", h.ReorderItems)
+
+		r.Route("/{itemID}", func(r chi.Router) {
+			r.With(editors).Get("/", h.GetItem)
+			r.With(editors).Patch("/", h.UpdateItem)
+			r.With(editors).Delete("/", h.DeleteItem)
+			r.With(stock).Put("/availability", h.SetAvailability)
+
+			r.With(editors).Get("/variants", h.ListVariants)
+			r.With(editors).Post("/variants", h.CreateVariant)
+			r.With(editors).Get("/modifier-groups", h.ListModifierGroups)
+			r.With(editors).Post("/modifier-groups", h.CreateModifierGroup)
+		})
+	})
+
+	r.Route("/variants/{variantID}", func(r chi.Router) {
+		r.With(editors).Patch("/", h.UpdateVariant)
+		r.With(editors).Delete("/", h.DeleteVariant)
+	})
+
+	r.Route("/modifier-groups/{groupID}", func(r chi.Router) {
+		r.With(editors).Patch("/", h.UpdateModifierGroup)
+		r.With(editors).Delete("/", h.DeleteModifierGroup)
+
+		r.With(editors).Get("/modifiers", h.ListModifiers)
+		r.With(editors).Post("/modifiers", h.CreateModifier)
+	})
+
+	r.Route("/modifiers/{modifierID}", func(r chi.Router) {
+		r.With(editors).Patch("/", h.UpdateModifier)
+		r.With(editors).Delete("/", h.DeleteModifier)
 	})
 }
 

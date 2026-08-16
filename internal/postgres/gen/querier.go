@@ -16,6 +16,11 @@ type Querier interface {
 	// expire on their own. See Phase 3.
 	//
 	BumpMenuVersion(ctx context.Context, arg BumpMenuVersionParams) (int32, error)
+	// Clears the current default so a new one can be set. The partial unique index
+	// allows only one default per item, so this must run first, in the same
+	// transaction.
+	//
+	ClearDefaultVariant(ctx context.Context, arg ClearDefaultVariantParams) (int64, error)
 	// Marks a token consumed. The WHERE clause makes this the atomic step of
 	// rotation: two concurrent refreshes with the same token race here, and exactly
 	// one updates a row. The loser gets no row back and is treated as a replay.
@@ -25,14 +30,45 @@ type Querier interface {
 	// or deactivating the last owner cannot lock everyone out of billing.
 	//
 	CountActiveOwners(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	CountItemsByRestaurant(ctx context.Context, restaurantID uuid.UUID) (int64, error)
+	// Counts every item a tenant owns across all their restaurants. This is the
+	// number a plan limit is checked against in Phase 6.
+	//
+	CountItemsByTenant(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	// Counts modifiers in a group, so the service can reject min_select greater
+	// than the number of choices that actually exist.
+	//
+	CountModifiersInGroup(ctx context.Context, arg CountModifiersInGroupParams) (int64, error)
 	CountRestaurants(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	CreateCategory(ctx context.Context, arg CreateCategoryParams) (Category, error)
+	CreateItem(ctx context.Context, arg CreateItemParams) (Item, error)
+	// Every query in this file is scoped by restaurant_id. The service verifies the
+	// restaurant belongs to the caller's tenant before any of these run, so the two
+	// checks together are what keep one restaurant's menu out of another's reach.
+	CreateMenu(ctx context.Context, arg CreateMenuParams) (Menu, error)
+	CreateModifier(ctx context.Context, arg CreateModifierParams) (Modifier, error)
+	CreateModifierGroup(ctx context.Context, arg CreateModifierGroupParams) (ModifierGroup, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateRestaurant(ctx context.Context, arg CreateRestaurantParams) (Restaurant, error)
 	CreateTenant(ctx context.Context, name string) (Tenant, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// Variants (sizes) and modifier groups/modifiers (extras) both hang off an
+	// item and follow the same scoping rule as everything else.
+	CreateVariant(ctx context.Context, arg CreateVariantParams) (ItemVariant, error)
+	DeleteCategory(ctx context.Context, arg DeleteCategoryParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	DeleteItem(ctx context.Context, arg DeleteItemParams) (int64, error)
+	DeleteMenu(ctx context.Context, arg DeleteMenuParams) (int64, error)
+	DeleteModifier(ctx context.Context, arg DeleteModifierParams) (int64, error)
+	DeleteModifierGroup(ctx context.Context, arg DeleteModifierGroupParams) (int64, error)
 	DeleteRestaurant(ctx context.Context, arg DeleteRestaurantParams) (int64, error)
 	DeleteUser(ctx context.Context, arg DeleteUserParams) (int64, error)
+	DeleteVariant(ctx context.Context, arg DeleteVariantParams) (int64, error)
+	GetCategory(ctx context.Context, arg GetCategoryParams) (Category, error)
+	GetItem(ctx context.Context, arg GetItemParams) (Item, error)
+	GetMenu(ctx context.Context, arg GetMenuParams) (Menu, error)
+	GetModifier(ctx context.Context, arg GetModifierParams) (Modifier, error)
+	GetModifierGroup(ctx context.Context, arg GetModifierGroupParams) (ModifierGroup, error)
 	// Looked up by hash, never by the token itself — only the SHA-256 is stored.
 	//
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (RefreshToken, error)
@@ -56,21 +92,58 @@ type Querier interface {
 	// request handler — use GetUser, which takes the tenant.
 	//
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
+	GetVariant(ctx context.Context, arg GetVariantParams) (ItemVariant, error)
+	ListCategories(ctx context.Context, arg ListCategoriesParams) ([]Category, error)
+	ListCategoriesByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Category, error)
+	ListItems(ctx context.Context, arg ListItemsParams) ([]Item, error)
+	// Loads every item for a restaurant in one scan. Phase 3 builds the whole
+	// public menu payload from queries like this rather than per-category round
+	// trips.
+	//
+	ListItemsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Item, error)
+	ListMenus(ctx context.Context, restaurantID uuid.UUID) ([]Menu, error)
+	ListModifierGroups(ctx context.Context, arg ListModifierGroupsParams) ([]ModifierGroup, error)
+	ListModifierGroupsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ModifierGroup, error)
+	ListModifiers(ctx context.Context, arg ListModifiersParams) ([]Modifier, error)
+	ListModifiersByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Modifier, error)
 	ListRestaurants(ctx context.Context, tenantID uuid.UUID) ([]Restaurant, error)
 	ListUsers(ctx context.Context, tenantID uuid.UUID) ([]User, error)
+	ListVariants(ctx context.Context, arg ListVariantsParams) ([]ItemVariant, error)
+	ListVariantsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ItemVariant, error)
+	ReorderCategories(ctx context.Context, arg ReorderCategoriesParams) (int64, error)
+	ReorderItems(ctx context.Context, arg ReorderItemsParams) (int64, error)
+	// Bulk reorder in one round trip. The array's order IS the new order --
+	// WITH ORDINALITY numbers the elements, so the client sends ids in the desired
+	// sequence and nothing has to stay in sync with a parallel positions array.
+	//
+	// The restaurant_id predicate still applies to every row, so a foreign id
+	// smuggled into the list simply matches nothing rather than reordering someone
+	// else's menu.
+	//
+	ReorderMenus(ctx context.Context, arg ReorderMenusParams) (int64, error)
 	// A replayed token means it leaked, so the entire rotation family dies, not
 	// just the one token.
 	//
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) (int64, error)
 	RevokeUserRefreshTokens(ctx context.Context, userID uuid.UUID) (int64, error)
+	// Flipping availability is the single most frequent menu write — a dish runs
+	// out mid-service — so it gets its own narrow query rather than a full update.
+	//
+	SetItemAvailability(ctx context.Context, arg SetItemAvailabilityParams) (Item, error)
 	SetUserActive(ctx context.Context, arg SetUserActiveParams) (User, error)
 	TouchUserLastLogin(ctx context.Context, id uuid.UUID) error
+	UpdateCategory(ctx context.Context, arg UpdateCategoryParams) (Category, error)
+	UpdateItem(ctx context.Context, arg UpdateItemParams) (Item, error)
+	UpdateMenu(ctx context.Context, arg UpdateMenuParams) (Menu, error)
+	UpdateModifier(ctx context.Context, arg UpdateModifierParams) (Modifier, error)
+	UpdateModifierGroup(ctx context.Context, arg UpdateModifierGroupParams) (ModifierGroup, error)
 	// Partial update: every field is nullable, and a NULL argument means "leave
 	// this alone". The casts are required for sqlc to infer a type for an argument
 	// that only ever appears inside COALESCE.
 	//
 	UpdateRestaurant(ctx context.Context, arg UpdateRestaurantParams) (Restaurant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
+	UpdateVariant(ctx context.Context, arg UpdateVariantParams) (ItemVariant, error)
 }
 
 var _ Querier = (*Queries)(nil)

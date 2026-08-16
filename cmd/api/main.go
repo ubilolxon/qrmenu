@@ -91,6 +91,7 @@ func run() error {
 		Issuer:      issuer,
 		AuthSvc:     authSvc,
 		Restaurants: service.NewRestaurant(store),
+		Menus:       service.NewMenu(store),
 	})
 
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)
