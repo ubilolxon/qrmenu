@@ -123,6 +123,18 @@ type Restaurant struct {
 	UpdatedAt     time.Time
 }
 
+type RestaurantTable struct {
+	ID           uuid.UUID
+	RestaurantID uuid.UUID
+	Label        string
+	QrToken      string
+	Seats        *int32
+	SortOrder    int32
+	IsActive     bool
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type Tenant struct {
 	ID        uuid.UUID
 	Name      string

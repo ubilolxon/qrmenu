@@ -16,6 +16,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/cache"
 	"github.com/ubilolxon/qrmenu/internal/config"
 	apphttp "github.com/ubilolxon/qrmenu/internal/http"
+	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/postgres"
 	"github.com/ubilolxon/qrmenu/internal/service"
 )
@@ -82,6 +83,11 @@ func run() error {
 		return fmt.Errorf("build auth service: %w", err)
 	}
 
+	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger), cfg.Public)
+	if err != nil {
+		return fmt.Errorf("build public handler: %w", err)
+	}
+
 	router := apphttp.NewRouter(apphttp.Deps{
 		Config:      cfg,
 		Logger:      logger,
@@ -92,6 +98,8 @@ func run() error {
 		AuthSvc:     authSvc,
 		Restaurants: service.NewRestaurant(store),
 		Menus:       service.NewMenu(store),
+		Tables:      service.NewTable(store),
+		PublicPages: publicPages,
 	})
 
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)

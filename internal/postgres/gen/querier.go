@@ -40,6 +40,7 @@ type Querier interface {
 	//
 	CountModifiersInGroup(ctx context.Context, arg CountModifiersInGroupParams) (int64, error)
 	CountRestaurants(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	CountTables(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	CreateCategory(ctx context.Context, arg CreateCategoryParams) (Category, error)
 	CreateItem(ctx context.Context, arg CreateItemParams) (Item, error)
 	// Every query in this file is scoped by restaurant_id. The service verifies the
@@ -50,6 +51,7 @@ type Querier interface {
 	CreateModifierGroup(ctx context.Context, arg CreateModifierGroupParams) (ModifierGroup, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateRestaurant(ctx context.Context, arg CreateRestaurantParams) (Restaurant, error)
+	CreateTable(ctx context.Context, arg CreateTableParams) (RestaurantTable, error)
 	CreateTenant(ctx context.Context, name string) (Tenant, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// Variants (sizes) and modifier groups/modifiers (extras) both hang off an
@@ -62,6 +64,7 @@ type Querier interface {
 	DeleteModifier(ctx context.Context, arg DeleteModifierParams) (int64, error)
 	DeleteModifierGroup(ctx context.Context, arg DeleteModifierGroupParams) (int64, error)
 	DeleteRestaurant(ctx context.Context, arg DeleteRestaurantParams) (int64, error)
+	DeleteTable(ctx context.Context, arg DeleteTableParams) (int64, error)
 	DeleteUser(ctx context.Context, arg DeleteUserParams) (int64, error)
 	DeleteVariant(ctx context.Context, arg DeleteVariantParams) (int64, error)
 	GetCategory(ctx context.Context, arg GetCategoryParams) (Category, error)
@@ -78,6 +81,13 @@ type Querier interface {
 	// nothing for an inactive restaurant so a suspended account goes dark.
 	//
 	GetRestaurantBySlug(ctx context.Context, slug string) (Restaurant, error)
+	GetTable(ctx context.Context, arg GetTableParams) (RestaurantTable, error)
+	// GetTableByToken serves the public request. Unscoped by design: the token is
+	// the guest's only identifier, and it is unguessable. The join brings the
+	// restaurant along because the caller needs both, and it drops the row when the
+	// restaurant is inactive so a suspended account goes dark.
+	//
+	GetTableByToken(ctx context.Context, qrToken string) (GetTableByTokenRow, error)
 	GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetUser(ctx context.Context, arg GetUserParams) (User, error)
 	// GetUserByEmail is deliberately NOT tenant-scoped: it is how login resolves
@@ -107,6 +117,7 @@ type Querier interface {
 	ListModifiers(ctx context.Context, arg ListModifiersParams) ([]Modifier, error)
 	ListModifiersByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Modifier, error)
 	ListRestaurants(ctx context.Context, tenantID uuid.UUID) ([]Restaurant, error)
+	ListTables(ctx context.Context, restaurantID uuid.UUID) ([]RestaurantTable, error)
 	ListUsers(ctx context.Context, tenantID uuid.UUID) ([]User, error)
 	ListVariants(ctx context.Context, arg ListVariantsParams) ([]ItemVariant, error)
 	ListVariantsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ItemVariant, error)
@@ -126,6 +137,10 @@ type Querier interface {
 	//
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) (int64, error)
 	RevokeUserRefreshTokens(ctx context.Context, userID uuid.UUID) (int64, error)
+	// Rotating the token invalidates every printed QR for that table. Used when a
+	// code leaks or a table is reassigned.
+	//
+	RotateTableToken(ctx context.Context, arg RotateTableTokenParams) (RestaurantTable, error)
 	// Flipping availability is the single most frequent menu write — a dish runs
 	// out mid-service — so it gets its own narrow query rather than a full update.
 	//
@@ -142,6 +157,7 @@ type Querier interface {
 	// that only ever appears inside COALESCE.
 	//
 	UpdateRestaurant(ctx context.Context, arg UpdateRestaurantParams) (Restaurant, error)
+	UpdateTable(ctx context.Context, arg UpdateTableParams) (RestaurantTable, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
 	UpdateVariant(ctx context.Context, arg UpdateVariantParams) (ItemVariant, error)
 }

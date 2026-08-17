@@ -95,3 +95,25 @@ func ToRestaurants(rows []gen.Restaurant) ([]domain.Restaurant, error) {
 	}
 	return out, nil
 }
+
+func ToTable(t gen.RestaurantTable) domain.Table {
+	return domain.Table{
+		ID:           t.ID,
+		RestaurantID: t.RestaurantID,
+		Label:        t.Label,
+		QRToken:      t.QrToken,
+		Seats:        t.Seats,
+		SortOrder:    t.SortOrder,
+		IsActive:     t.IsActive,
+		CreatedAt:    t.CreatedAt,
+		UpdatedAt:    t.UpdatedAt,
+	}
+}
+
+func ToTables(rows []gen.RestaurantTable) []domain.Table {
+	out := make([]domain.Table, len(rows))
+	for i, r := range rows {
+		out[i] = ToTable(r)
+	}
+	return out
+}

@@ -139,3 +139,9 @@ func PathUUID(r *http.Request, param string, value string) (uuid.UUID, error) {
 	}
 	return id, nil
 }
+
+// isNotFound reports whether an error should render as "no such thing", used by
+// the HTML surface which needs a page rather than a JSON envelope.
+func isNotFound(err error) bool {
+	return errors.Is(err, domain.ErrNotFound)
+}

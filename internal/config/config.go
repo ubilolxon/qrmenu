@@ -22,6 +22,20 @@ type Config struct {
 	Redis    Redis
 	Storage  Storage
 	Auth     Auth
+	Public   Public
+}
+
+type Public struct {
+	// BaseURL is what QR codes encode and what printed cards show, so it must
+	// be the address a guest's phone can actually reach — not the internal
+	// listen address.
+	BaseURL string
+	// CacheMaxAge is the browser/CDN freshness window for a public menu.
+	CacheMaxAge time.Duration
+	// StaleWhileRevalidate lets a CDN keep serving a slightly old menu while it
+	// fetches a new one, so a cache expiry never becomes a latency spike at the
+	// start of a dinner rush.
+	StaleWhileRevalidate time.Duration
 }
 
 type Auth struct {
@@ -119,6 +133,11 @@ func Load() (Config, error) {
 			CookieName:   l.str("AUTH_COOKIE_NAME", "qrmenu_refresh"),
 			CookieDomain: l.str("AUTH_COOKIE_DOMAIN", ""),
 			CookiePath:   l.str("AUTH_COOKIE_PATH", "/api/v1/admin/auth"),
+		},
+		Public: Public{
+			BaseURL:              strings.TrimRight(l.str("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+			CacheMaxAge:          l.dur("PUBLIC_CACHE_MAX_AGE", 60*time.Second),
+			StaleWhileRevalidate: l.dur("PUBLIC_STALE_WHILE_REVALIDATE", 300*time.Second),
 		},
 	}
 

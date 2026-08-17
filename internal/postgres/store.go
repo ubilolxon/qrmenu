@@ -100,6 +100,13 @@ func constraintLabel(constraint string) string {
 		return "slug is already taken"
 	case "refresh_tokens_hash_uniq":
 		return "token already exists"
+	case "restaurant_tables_token_uniq":
+		// Not user-facing: the server generates tokens, so a collision here is
+		// retried rather than reported. The word "token" is what the retry
+		// check looks for.
+		return "qr token already exists"
+	case "restaurant_tables_label_uniq":
+		return "a table with that label already exists"
 	default:
 		return "record already exists"
 	}

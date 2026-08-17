@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -30,6 +31,8 @@ type Deps struct {
 	AuthSvc     *service.Auth
 	Restaurants *service.Restaurant
 	Menus       *service.Menu
+	Tables      *service.Table
+	PublicPages handler.Public
 }
 
 // NewRouter builds the full route tree.
@@ -47,13 +50,38 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Recover)
 	r.Use(middleware.CORS(d.Config.HTTP.AllowedOrigins))
 
+	// HEAD is mandatory wherever GET is offered (RFC 9110 §9.1), and chi only
+	// registers the methods you name. Without this, every CDN, uptime monitor
+	// and link previewer that probes with HEAD gets a 405. Falling through to
+	// the GET handler is correct: net/http discards the body for a HEAD
+	// response but keeps the headers, which is exactly the semantics wanted.
+	r.Use(chimw.GetHead)
+
 	health := handler.Health{DB: d.DB, Redis: d.Redis, Version: d.Version}
 	r.Get("/healthz", health.Live)
 	r.Get("/readyz", health.Ready)
 
+	// Guest-facing pages, deliberately outside /api: these are what a QR code
+	// points at, and a URL a person may read off a printed card should be as
+	// short as possible.
+	//
+	// /m/{slug} is the restaurant's own menu link; /t/{token} is a specific
+	// table, and carries the table context an order will need in Phase 5.
+	r.Get("/m/{slug}", d.PublicPages.PageBySlug)
+	r.Get("/m/{slug}/qr.png", d.PublicPages.QRBySlug("png"))
+	r.Get("/m/{slug}/qr.svg", d.PublicPages.QRBySlug("svg"))
+	r.Get("/m/{slug}/qr.card.svg", d.PublicPages.QRBySlug("card.svg"))
+
+	r.Get("/t/{token}", d.PublicPages.PageByToken)
+	r.Get("/t/{token}/qr.png", d.PublicPages.QRByToken("png"))
+	r.Get("/t/{token}/qr.svg", d.PublicPages.QRByToken("svg"))
+	r.Get("/t/{token}/qr.card.svg", d.PublicPages.QRByToken("card.svg"))
+
 	r.Route("/api/v1", func(r chi.Router) {
-		// Guests scanning a QR code. No auth; cached aggressively. (Phase 3)
+		// Guests scanning a QR code. No auth, heavily cached, ETag-validated.
 		r.Route("/public", func(r chi.Router) {
+			r.Get("/m/{slug}", d.PublicPages.MenuBySlug)
+			r.Get("/t/{token}", d.PublicPages.MenuByToken)
 			r.NotFound(notImplemented)
 		})
 
@@ -125,6 +153,7 @@ func (d Deps) mountAdmin(r chi.Router) {
 					Delete("/", restaurants.Delete)
 
 				mountMenu(r, handler.NewMenu(d.Menus))
+				mountTables(r, handler.NewTable(d.Tables, d.Config.Public))
 			})
 		})
 	})
@@ -207,6 +236,28 @@ func mountMenu(r chi.Router, h handler.Menu) {
 	r.Route("/modifiers/{modifierID}", func(r chi.Router) {
 		r.With(editors).Patch("/", h.UpdateModifier)
 		r.With(editors).Delete("/", h.DeleteModifier)
+	})
+}
+
+// mountTables manages the physical tables and their QR codes.
+//
+// Rotating a token invalidates every printed code for that table, so it is
+// owner-only — a manager can add and rename tables without being able to
+// silently break the codes already on them.
+func mountTables(r chi.Router, h handler.Table) {
+	editors := middleware.RequireRole(domain.RoleOwner, domain.RoleManager)
+
+	r.Route("/tables", func(r chi.Router) {
+		r.With(editors).Get("/", h.List)
+		r.With(editors).Post("/", h.Create)
+
+		r.Route("/{tableID}", func(r chi.Router) {
+			r.With(editors).Get("/", h.Get)
+			r.With(editors).Patch("/", h.Update)
+			r.With(editors).Delete("/", h.Delete)
+			r.With(middleware.RequireRole(domain.RoleOwner)).
+				Post("/rotate-token", h.RotateToken)
+		})
 	})
 }
 

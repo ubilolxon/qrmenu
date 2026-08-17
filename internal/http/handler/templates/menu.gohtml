@@ -1,0 +1,166 @@
+{{- /*
+Server-rendered public menu.
+
+This page is deliberately plain HTML with inlined CSS and no JavaScript. A guest
+scanning a QR code is on a phone, on restaurant wifi, and wants the menu now —
+every script and round trip is time they spend looking at a blank screen. It
+also means the menu still works with JS disabled and is readable by screen
+readers and search engines.
+
+The SPA can replace this later; it stays useful as a no-JS fallback.
+*/ -}}
+<!doctype html>
+<html lang="{{ .Locale }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{ .Menu.Restaurant.Name }}</title>
+<meta name="description" content="{{ .Menu.Restaurant.Description }}">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #141414; --muted: #6b6b6b; --line: #e8e6e2;
+    --accent: #8a6b3d; --card: #faf9f7; --warn: #b4441f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131211; --fg: #f2efea; --muted: #9d968c; --line: #2b2825;
+      --accent: #d0a869; --card: #1c1a18; --warn: #e07a55;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 1.25rem 1.15rem 4rem; }
+
+  header { padding-bottom: 1.1rem; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 .3rem; font-size: 1.7rem; letter-spacing: -.02em; }
+  .tagline { margin: 0; color: var(--muted); }
+  .meta { margin: .7rem 0 0; padding: 0; list-style: none; color: var(--muted); font-size: .88rem; }
+  .meta li { display: inline-block; margin-right: 1rem; }
+  .meta a { color: inherit; }
+
+  .table-badge {
+    display: inline-block; margin-top: .85rem; padding: .3rem .7rem;
+    background: var(--accent); color: var(--bg);
+    border-radius: 999px; font-size: .8rem; font-weight: 600;
+  }
+
+  .langs { margin: .9rem 0 0; display: flex; gap: .4rem; flex-wrap: wrap; }
+  .langs a {
+    padding: .22rem .6rem; border: 1px solid var(--line); border-radius: 999px;
+    text-decoration: none; color: var(--muted); font-size: .82rem;
+  }
+  .langs a[aria-current="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+  h2 {
+    margin: 2.2rem 0 .2rem; font-size: 1.25rem; letter-spacing: -.01em;
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+  }
+  h3 {
+    margin: 1.6rem 0 .6rem; font-size: .82rem; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--accent);
+  }
+  .window { font-size: .78rem; font-weight: 400; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  .closed { opacity: .55; }
+
+  .item { padding: .85rem 0; border-bottom: 1px solid var(--line); }
+  .item-head { display: flex; gap: 1rem; align-items: baseline; }
+  .item-name { font-weight: 600; flex: 1; }
+  .price { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .desc { margin: .25rem 0 0; color: var(--muted); font-size: .92rem; }
+
+  .tags { margin: .45rem 0 0; padding: 0; list-style: none; display: flex; gap: .35rem; flex-wrap: wrap; }
+  .tags li {
+    font-size: .72rem; padding: .12rem .5rem; border-radius: 999px;
+    background: var(--card); color: var(--muted); border: 1px solid var(--line);
+  }
+  .tags li.allergen { color: var(--warn); border-color: var(--warn); }
+  .soldout { color: var(--warn); font-weight: 600; font-size: .78rem; }
+
+  .options { margin: .5rem 0 0; font-size: .86rem; color: var(--muted); }
+  .options div { margin-top: .18rem; }
+  .options b { font-weight: 600; color: var(--fg); }
+
+  .empty { color: var(--muted); font-style: italic; padding: 2rem 0; }
+  footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .78rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>{{ .Menu.Restaurant.Name }}</h1>
+  {{ with .Menu.Restaurant.Description }}<p class="tagline">{{ . }}</p>{{ end }}
+
+  <ul class="meta">
+    {{ with .Menu.Restaurant.Address }}<li>{{ . }}</li>{{ end }}
+    {{ with .Menu.Restaurant.Phone }}<li><a href="tel:{{ . }}">{{ . }}</a></li>{{ end }}
+  </ul>
+
+  {{ with .Table }}<span class="table-badge">{{ $.T.Table }} {{ .Label }}</span>{{ end }}
+
+  {{ if gt (len .LocaleLinks) 1 }}
+  <nav class="langs" aria-label="Language">
+    {{ range .LocaleLinks }}
+      <a href="{{ .URL }}" {{ if .Current }}aria-current="true"{{ end }} lang="{{ .Locale }}">{{ .Locale }}</a>
+    {{ end }}
+  </nav>
+  {{ end }}
+</header>
+
+{{ if not .Menus }}
+  <p class="empty">{{ .T.NoMenu }}</p>
+{{ end }}
+
+{{ range .Menus }}
+  <section class="{{ if not .AvailableNow }}closed{{ end }}">
+    <h2>
+      {{ .Name }}
+      {{ with .WindowLabel }}<span class="window">{{ . }}</span>{{ end }}
+    </h2>
+    {{ with .Description }}<p class="tagline">{{ . }}</p>{{ end }}
+
+    {{ range .Categories }}
+      <h3>{{ .Name }}</h3>
+      {{ range .Items }}
+        <article class="item">
+          <div class="item-head">
+            <span class="item-name">{{ .Name }}</span>
+            <span class="price">
+              {{ if .IsAvailable }}{{ .Price }}{{ else }}<span class="soldout">{{ $.T.SoldOut }}</span>{{ end }}
+            </span>
+          </div>
+          {{ with .Description }}<p class="desc">{{ . }}</p>{{ end }}
+
+          {{ if or .Tags .Allergens }}
+          <ul class="tags">
+            {{ range .Tags }}<li>{{ . }}</li>{{ end }}
+            {{ range .Allergens }}<li class="allergen">{{ . }}</li>{{ end }}
+          </ul>
+          {{ end }}
+
+          {{ if or .Variants .ModifierGroups }}
+          <div class="options">
+            {{ if .Variants }}<div><b>{{ $.T.Sizes }}</b> {{ .VariantLine }}</div>{{ end }}
+            {{ range .ModifierGroups }}<div><b>{{ .Name }}</b> {{ .Line }}</div>{{ end }}
+          </div>
+          {{ end }}
+        </article>
+      {{ else }}
+        <p class="empty">{{ $.T.NoItems }}</p>
+      {{ end }}
+    {{ end }}
+  </section>
+{{ end }}
+
+<footer>
+  {{ .Menu.Restaurant.Name }} · {{ .T.Prices }} {{ .Menu.Restaurant.Currency }}
+</footer>
+
+</div>
+</body>
+</html>

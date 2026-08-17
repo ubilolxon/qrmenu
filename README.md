@@ -29,8 +29,11 @@ cmd/migrate      goose migration runner
 internal/config  environment → validated Config, resolved once at boot
 internal/domain  pure business types and rules — imports no infrastructure
 internal/postgres  pool, embedded migrations, sqlc output, repositories
-internal/http    router, middleware, handlers, DTOs
+internal/http    router, middleware, handlers, DTOs, public page templates
 internal/cache   Redis (public menu cache; never on a write path)
+internal/money   minor-unit formatting; owns the zero-decimal currency list
+internal/qr      QR rendering — PNG, SVG, printable table tent
+internal/i18n    locale negotiation and fallback for translated fields
 web/             SPA (separate build)
 deploy/          Dockerfile, docker-compose
 ```
@@ -67,7 +70,48 @@ matters is a query missing its scope, so:
 
 ## API
 
-Admin surface (`/api/v1/admin`). Public and staff surfaces arrive in Phases 3 and 5.
+Three surfaces: public (unauthenticated, cached), admin (`/api/v1/admin`, JWT),
+and staff (Phase 5).
+
+### Public
+
+Guest pages live **outside** `/api`, because these URLs get printed on cards and
+a person may have to type one.
+
+| Method | Path | Returns |
+|---|---|---|
+| GET HEAD | `/m/{slug}` | the restaurant's menu as HTML |
+| GET HEAD | `/t/{token}` | the same menu, with table context |
+| GET HEAD | `/m/{slug}/qr.png` `qr.svg` `qr.card.svg` | QR for the restaurant link |
+| GET HEAD | `/t/{token}/qr.png` `qr.svg` `qr.card.svg` | QR for one table |
+| GET HEAD | `/api/v1/public/m/{slug}` | the menu as JSON |
+| GET HEAD | `/api/v1/public/t/{token}` | the menu as JSON, with table context |
+
+`?locale=uz|ru|en` overrides the `Accept-Language` header. `?size=` on a QR
+endpoint is pixels, clamped to 128–2048 (default 512) — rendering is CPU work,
+so an unbounded size would be a cheap way to load the server.
+
+The HTML is plain HTML with inline CSS and **no JavaScript**. A guest on
+restaurant wifi wants the menu now; it also works with JS off, reads correctly in
+a screen reader, and follows `prefers-color-scheme`.
+
+Responses carry an `ETag`, honour `If-None-Match` with a 304, and set
+`Cache-Control: public, max-age=…, stale-while-revalidate=…` and
+`Vary: Accept-Language`. Server-side, a rendered menu is cached in Redis under
+`menu:{restaurantID}:{locale}:v{menuVersion}` — see the menu data model below for
+why the version is a key *suffix* rather than something to invalidate. Every
+cache failure path is treated as a miss, never an error.
+
+`qr.card.svg` is a printable 420×560 table tent: the code plus the restaurant and
+table names, as a standalone SVG a print shop can use directly. Vector, because a
+PNG blown up to A4 goes soft.
+
+Table QR tokens are 14 characters of Crockford base32 (no I, L, O or U, so they
+survive being read aloud or copied by hand) and are unique platform-wide, which
+is why `/t/{token}` needs no restaurant in the URL. Rotating a token is
+owner-only: it invalidates every code already printed for that table.
+
+### Admin
 
 | Method | Path | Auth | Roles |
 |---|---|---|---|
@@ -107,6 +151,14 @@ manager, except where noted.
 Marking a dish sold out is the one menu write that happens mid-service, so
 kitchen and waiting staff can do it without being able to change anything else.
 
+Tables, also under `/restaurants/{restaurantID}`:
+
+| Method | Path | Notes |
+|---|---|---|
+| GET POST | `/tables` | |
+| GET PATCH DELETE | `/tables/{tableID}` | |
+| POST | `/tables/{tableID}/rotate-token` | **owner only** — breaks printed codes |
+
 ## Menu data model
 
 Every table in the tree carries `restaurant_id`, even though it could be reached
@@ -120,8 +172,18 @@ key** on `(parent_id, restaurant_id)`, so Postgres itself refuses to let a
 category belong to a menu from a different restaurant. The redundancy is
 enforced, not merely intended.
 
-Prices are `bigint` minor units (tiyin, cents); the currency lives on the
-restaurant. Menu availability windows are minutes from midnight, and a window
+Prices are `bigint` minor units; the currency lives on the restaurant.
+
+**UZS is treated as a zero-decimal currency**, so `price_minor` holds whole som.
+This is a deliberate divergence from ISO 4217, which assigns UZS an exponent of
+2 — but tiyin have been out of circulation for years and nothing is priced in
+them. Following the standard would put two zeroes on every price that nobody
+types, reads or charges. Read `price_minor` as "the smallest unit this currency
+is actually used in", not always the ISO minor unit. The rule lives in one place,
+`internal/money`, and is pinned by a test: changing it back would silently
+multiply every price on every menu by 100.
+
+Menu availability windows are minutes from midnight, and a window
 may wrap midnight — a 22:00–02:00 late menu has `from > to`, and the hours after
 midnight belong to the day the window opened.
 
@@ -160,6 +222,14 @@ delete another's rows through any service method — and that the refusal is
 Fakes cannot catch a missing `WHERE tenant_id`; only a real database can.
 **Every new tenant-scoped method needs a case there.**
 
+`internal/http/handler/public_test.go` renders the real template. `html/template`
+resolves almost everything at *render* time — a field that does not exist, or a
+func-typed field the template tries to call, parses cleanly and then aborts
+mid-document, leaving a page that just stops after the heading. Nothing catches
+that at compile time, so the test executes the template and checks the output
+still ends in `</html>`. **Any change to `menu.gohtml` or the view model should
+be covered there**, or the failure mode is a truncated page nobody notices.
+
 ## Status
 
 - **Phase 0** — skeleton, config, migrations, health, compose, CI.
@@ -167,5 +237,7 @@ Fakes cannot catch a missing `WHERE tenant_id`; only a real database can.
   tokens, roles, restaurants CRUD, tenant-isolation suite.
 - **Phase 2** — menus, categories, items, variants, modifier groups and
   modifiers; bulk reorder; availability toggle; translated fields throughout.
-- **Phase 3 is the milestone to aim at**: public menu endpoint + QR generation
-  is the first thing you can demo on a phone.
+- **Phase 3** — tables and QR tokens; public menu as HTML and JSON in uz/ru/en;
+  QR as PNG, SVG and a printable table tent; Redis cache keyed on `menu_version`;
+  ETag/304. This is the first part you can demo on a phone.
+- **Phase 4 next** — image uploads (S3-compatible, presigned PUT).
