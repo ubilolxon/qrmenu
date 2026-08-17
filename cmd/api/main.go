@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/postgres"
 	"github.com/ubilolxon/qrmenu/internal/service"
+	"github.com/ubilolxon/qrmenu/internal/storage"
 )
 
 func main() {
@@ -75,6 +77,20 @@ func run() error {
 		logger.Info("connected to redis", slog.String("addr", cfg.Redis.Addr))
 	}
 
+	// Object storage holds uploaded images. Like Redis it is not required to
+	// boot: without it the API refuses uploads and the menu serves without
+	// photos, which is a worse menu but a working one.
+	files, err := storage.New(cfg.Storage)
+	if err != nil {
+		return fmt.Errorf("connect storage: %w", err)
+	}
+	if err := files.EnsureBucket(ctx, cfg.Storage.Region); err != nil {
+		logger.Warn("object storage is not ready; image uploads will fail until it is",
+			slog.String("bucket", files.Bucket()), slog.Any("error", err))
+	} else {
+		logger.Info("object storage ready", slog.String("bucket", files.Bucket()))
+	}
+
 	store := postgres.NewStore(db)
 	issuer := auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTTL, cfg.Auth.Issuer)
 
@@ -83,7 +99,9 @@ func run() error {
 		return fmt.Errorf("build auth service: %w", err)
 	}
 
-	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger), cfg.Public)
+	images := service.NewImage(store, files, logger)
+
+	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger, files), cfg.Public)
 	if err != nil {
 		return fmt.Errorf("build public handler: %w", err)
 	}
@@ -99,10 +117,45 @@ func run() error {
 		Restaurants: service.NewRestaurant(store),
 		Menus:       service.NewMenu(store),
 		Tables:      service.NewTable(store),
+		Images:      images,
+		Files:       files,
 		PublicPages: publicPages,
 	})
 
+	// Presigned uploads that are never completed would otherwise accumulate as
+	// pending rows and orphaned objects, on a bill that only ever grows.
+	go sweepAbandonedUploads(ctx, images, logger)
+
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)
+}
+
+// SweepInterval is how often abandoned uploads are cleared. Nothing depends on
+// it being prompt — the cost of a late sweep is a few kilobytes — so it runs
+// rarely enough to be invisible.
+const SweepInterval = time.Hour
+
+// sweepAbandonedUploads runs until shutdown. Running it in every instance is
+// intentional: the work is idempotent, and a leader election for a garbage
+// collector would be more machinery than the problem deserves.
+func sweepAbandonedUploads(ctx context.Context, images *service.Image, logger *slog.Logger) {
+	ticker := time.NewTicker(SweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := images.SweepStale(ctx)
+			if err != nil {
+				logger.Warn("upload sweep failed", slog.Any("error", err))
+				continue
+			}
+			if n > 0 {
+				logger.Info("cleared abandoned uploads", slog.Int("count", n))
+			}
+		}
+	}
 }
 
 // newLogger emits JSON in deployed environments so logs are queryable, and

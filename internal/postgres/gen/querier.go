@@ -30,6 +30,7 @@ type Querier interface {
 	// or deactivating the last owner cannot lock everyone out of billing.
 	//
 	CountActiveOwners(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	CountImages(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	CountItemsByRestaurant(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	// Counts every item a tenant owns across all their restaurants. This is the
 	// number a plan limit is checked against in Phase 6.
@@ -42,6 +43,16 @@ type Querier interface {
 	CountRestaurants(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	CountTables(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	CreateCategory(ctx context.Context, arg CreateCategoryParams) (Category, error)
+	// The row is created before the bytes exist, so the client can be handed a
+	// presigned URL to upload to. It stays 'pending' until the server has fetched
+	// the object back and decoded it.
+	//
+	// The id is supplied rather than defaulted. It has to be: the storage key is
+	// built from it before the row exists, so letting the database pick its own
+	// would put the original under one prefix and its derivatives under another —
+	// and every prefix-based delete would then silently orphan the original.
+	//
+	CreateImage(ctx context.Context, arg CreateImageParams) (Image, error)
 	CreateItem(ctx context.Context, arg CreateItemParams) (Item, error)
 	// Every query in this file is scoped by restaurant_id. The service verifies the
 	// restaurant belongs to the caller's tenant before any of these run, so the two
@@ -59,6 +70,12 @@ type Querier interface {
 	CreateVariant(ctx context.Context, arg CreateVariantParams) (ItemVariant, error)
 	DeleteCategory(ctx context.Context, arg DeleteCategoryParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	// Returns the row so the caller knows which storage prefix to clear. Anything
+	// pointing at the image is set to NULL by the foreign keys, which is why
+	// deleting a photo does not delete the dish.
+	//
+	DeleteImage(ctx context.Context, arg DeleteImageParams) (Image, error)
+	DeleteImageByID(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteItem(ctx context.Context, arg DeleteItemParams) (int64, error)
 	DeleteMenu(ctx context.Context, arg DeleteMenuParams) (int64, error)
 	DeleteModifier(ctx context.Context, arg DeleteModifierParams) (int64, error)
@@ -68,6 +85,7 @@ type Querier interface {
 	DeleteUser(ctx context.Context, arg DeleteUserParams) (int64, error)
 	DeleteVariant(ctx context.Context, arg DeleteVariantParams) (int64, error)
 	GetCategory(ctx context.Context, arg GetCategoryParams) (Category, error)
+	GetImage(ctx context.Context, arg GetImageParams) (Image, error)
 	GetItem(ctx context.Context, arg GetItemParams) (Item, error)
 	GetMenu(ctx context.Context, arg GetMenuParams) (Menu, error)
 	GetModifier(ctx context.Context, arg GetModifierParams) (Modifier, error)
@@ -105,6 +123,7 @@ type Querier interface {
 	GetVariant(ctx context.Context, arg GetVariantParams) (ItemVariant, error)
 	ListCategories(ctx context.Context, arg ListCategoriesParams) ([]Category, error)
 	ListCategoriesByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Category, error)
+	ListImages(ctx context.Context, arg ListImagesParams) ([]Image, error)
 	ListItems(ctx context.Context, arg ListItemsParams) ([]Item, error)
 	// Loads every item for a restaurant in one scan. Phase 3 builds the whole
 	// public menu payload from queries like this rather than per-category round
@@ -116,11 +135,29 @@ type Querier interface {
 	ListModifierGroupsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ModifierGroup, error)
 	ListModifiers(ctx context.Context, arg ListModifiersParams) ([]Modifier, error)
 	ListModifiersByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Modifier, error)
+	// ListReadyImages feeds the public menu. Only 'ready' rows are returned, so a
+	// pending or failed upload can never reach a guest's page.
+	//
+	ListReadyImages(ctx context.Context, restaurantID uuid.UUID) ([]Image, error)
 	ListRestaurants(ctx context.Context, tenantID uuid.UUID) ([]Restaurant, error)
+	// A presigned upload that was never completed — a tab closed mid-upload, an app
+	// that crashed — leaves a pending row and possibly an orphaned object. Both are
+	// swept on a timer; without this they accumulate and are billed forever.
+	//
+	ListStalePendingImages(ctx context.Context, arg ListStalePendingImagesParams) ([]Image, error)
 	ListTables(ctx context.Context, restaurantID uuid.UUID) ([]RestaurantTable, error)
 	ListUsers(ctx context.Context, tenantID uuid.UUID) ([]User, error)
 	ListVariants(ctx context.Context, arg ListVariantsParams) ([]ItemVariant, error)
 	ListVariantsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ItemVariant, error)
+	// A failed row is kept rather than deleted so the client can be told why. The
+	// message is user-facing and must not carry internal detail.
+	//
+	MarkImageFailed(ctx context.Context, arg MarkImageFailedParams) (Image, error)
+	// Promotion is deliberately not guarded on status = 'pending'. Completing twice
+	// writes the same derivative keys to the same places, so making the second call
+	// a no-success would report a spurious failure for a retry that in fact worked.
+	//
+	MarkImageReady(ctx context.Context, arg MarkImageReadyParams) (Image, error)
 	ReorderCategories(ctx context.Context, arg ReorderCategoriesParams) (int64, error)
 	ReorderItems(ctx context.Context, arg ReorderItemsParams) (int64, error)
 	// Bulk reorder in one round trip. The array's order IS the new order --

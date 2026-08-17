@@ -36,6 +36,8 @@ type restaurantResponse struct {
 	Phone         *string        `json:"phone"`
 	Address       *string        `json:"address"`
 	Theme         map[string]any `json:"theme"`
+	LogoImageID   *string        `json:"logo_image_id"`
+	CoverImageID  *string        `json:"cover_image_id"`
 	MenuVersion   int32          `json:"menu_version"`
 	IsActive      bool           `json:"is_active"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -55,6 +57,8 @@ func toRestaurantResponse(r domain.Restaurant) restaurantResponse {
 		Phone:         r.Phone,
 		Address:       r.Address,
 		Theme:         r.Theme,
+		LogoImageID:   uuidString(r.LogoImageID),
+		CoverImageID:  uuidString(r.CoverImageID),
 		MenuVersion:   r.MenuVersion,
 		IsActive:      r.IsActive,
 		CreatedAt:     r.CreatedAt,
@@ -87,6 +91,10 @@ type updateRestaurantRequest struct {
 	Phone         *string         `json:"phone"`
 	Address       *string         `json:"address"`
 	Theme         *map[string]any `json:"theme"`
+	LogoImageID   *string         `json:"logo_image_id"`
+	ClearLogo     bool            `json:"clear_logo"`
+	CoverImageID  *string         `json:"cover_image_id"`
+	ClearCover    bool            `json:"clear_cover"`
 	IsActive      *bool           `json:"is_active"`
 }
 
@@ -185,7 +193,7 @@ func (h Restaurant) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.svc.Update(r.Context(), identity.TenantID, id, service.RestaurantPatch{
+	patch := service.RestaurantPatch{
 		Slug:          req.Slug,
 		Name:          req.Name,
 		Description:   req.Description,
@@ -197,7 +205,19 @@ func (h Restaurant) Update(w http.ResponseWriter, r *http.Request) {
 		Address:       req.Address,
 		Theme:         req.Theme,
 		IsActive:      req.IsActive,
-	})
+		ClearLogo:     req.ClearLogo,
+		ClearCover:    req.ClearCover,
+	}
+	if patch.LogoImageID, err = optionalUUID(req.LogoImageID, "logo_image_id"); err != nil {
+		RenderError(w, r, err)
+		return
+	}
+	if patch.CoverImageID, err = optionalUUID(req.CoverImageID, "cover_image_id"); err != nil {
+		RenderError(w, r, err)
+		return
+	}
+
+	updated, err := h.svc.Update(r.Context(), identity.TenantID, id, patch)
 	if err != nil {
 		RenderError(w, r, err)
 		return

@@ -44,7 +44,7 @@ INSERT INTO items (
     sort_order, tags, allergens, calories, prep_minutes
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at
+RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id
 `
 
 type CreateItemParams struct {
@@ -89,6 +89,7 @@ func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) (Item, e
 		&i.PrepMinutes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImageID,
 	)
 	return i, err
 }
@@ -111,7 +112,7 @@ func (q *Queries) DeleteItem(ctx context.Context, arg DeleteItemParams) (int64, 
 }
 
 const getItem = `-- name: GetItem :one
-SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at FROM items WHERE id = $1 AND restaurant_id = $2
+SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id FROM items WHERE id = $1 AND restaurant_id = $2
 `
 
 type GetItemParams struct {
@@ -137,12 +138,13 @@ func (q *Queries) GetItem(ctx context.Context, arg GetItemParams) (Item, error) 
 		&i.PrepMinutes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImageID,
 	)
 	return i, err
 }
 
 const listItems = `-- name: ListItems :many
-SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at FROM items
+SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id FROM items
 WHERE category_id = $1 AND restaurant_id = $2
 ORDER BY sort_order, created_at
 `
@@ -176,6 +178,7 @@ func (q *Queries) ListItems(ctx context.Context, arg ListItemsParams) ([]Item, e
 			&i.PrepMinutes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImageID,
 		); err != nil {
 			return nil, err
 		}
@@ -188,7 +191,7 @@ func (q *Queries) ListItems(ctx context.Context, arg ListItemsParams) ([]Item, e
 }
 
 const listItemsByRestaurant = `-- name: ListItemsByRestaurant :many
-SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at FROM items
+SELECT id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id FROM items
 WHERE restaurant_id = $1
 ORDER BY sort_order, created_at
 `
@@ -220,6 +223,7 @@ func (q *Queries) ListItemsByRestaurant(ctx context.Context, restaurantID uuid.U
 			&i.PrepMinutes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImageID,
 		); err != nil {
 			return nil, err
 		}
@@ -255,7 +259,7 @@ const setItemAvailability = `-- name: SetItemAvailability :one
 UPDATE items
 SET is_available = $1
 WHERE id = $2 AND restaurant_id = $3
-RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at
+RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id
 `
 
 type SetItemAvailabilityParams struct {
@@ -284,6 +288,7 @@ func (q *Queries) SetItemAvailability(ctx context.Context, arg SetItemAvailabili
 		&i.PrepMinutes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImageID,
 	)
 	return i, err
 }
@@ -301,9 +306,13 @@ SET name         = COALESCE($1::jsonb, name),
                         ELSE COALESCE($9::integer, calories) END,
     prep_minutes = CASE WHEN $10::boolean THEN NULL
                         ELSE COALESCE($11::integer, prep_minutes) END,
-    category_id  = COALESCE($12::uuid, category_id)
-WHERE id = $13 AND restaurant_id = $14
-RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at
+    category_id  = COALESCE($12::uuid, category_id),
+    -- The composite foreign key on (image_id, restaurant_id) is what stops one
+    -- restaurant attaching another's photo; there is no check to write here.
+    image_id     = CASE WHEN $13::boolean THEN NULL
+                        ELSE COALESCE($14::uuid, image_id) END
+WHERE id = $15 AND restaurant_id = $16
+RETURNING id, restaurant_id, category_id, name, description, price_minor, is_available, sort_order, tags, allergens, calories, prep_minutes, created_at, updated_at, image_id
 `
 
 type UpdateItemParams struct {
@@ -319,6 +328,8 @@ type UpdateItemParams struct {
 	ClearPrepMinutes bool
 	PrepMinutes      *int32
 	CategoryID       *uuid.UUID
+	ClearImage       bool
+	ImageID          *uuid.UUID
 	ID               uuid.UUID
 	RestaurantID     uuid.UUID
 }
@@ -337,6 +348,8 @@ func (q *Queries) UpdateItem(ctx context.Context, arg UpdateItemParams) (Item, e
 		arg.ClearPrepMinutes,
 		arg.PrepMinutes,
 		arg.CategoryID,
+		arg.ClearImage,
+		arg.ImageID,
 		arg.ID,
 		arg.RestaurantID,
 	)
@@ -356,6 +369,7 @@ func (q *Queries) UpdateItem(ctx context.Context, arg UpdateItemParams) (Item, e
 		&i.PrepMinutes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImageID,
 	)
 	return i, err
 }

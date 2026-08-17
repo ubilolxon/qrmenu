@@ -140,8 +140,33 @@ func PathUUID(r *http.Request, param string, value string) (uuid.UUID, error) {
 	return id, nil
 }
 
+// optionalUUID parses a UUID that the client may have omitted.
+//
+// Absent stays absent — nil means "leave this alone" in a PATCH, and turning a
+// missing field into uuid.Nil would silently mean "attach nothing".
+func optionalUUID(raw *string, field string) (*uuid.UUID, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	id, err := uuid.Parse(*raw)
+	if err != nil {
+		return nil, domain.Errorf(errBadRequest, "%s must be a valid UUID.", field)
+	}
+	return &id, nil
+}
+
 // isNotFound reports whether an error should render as "no such thing", used by
 // the HTML surface which needs a page rather than a JSON envelope.
 func isNotFound(err error) bool {
 	return errors.Is(err, domain.ErrNotFound)
+}
+
+// uuidString renders an optional id for a JSON response, keeping null as null
+// rather than the zero UUID.
+func uuidString(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
 }

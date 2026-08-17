@@ -86,6 +86,7 @@ func ToItem(i gen.Item) (domain.Item, error) {
 		Allergens:    i.Allergens,
 		Calories:     i.Calories,
 		PrepMinutes:  i.PrepMinutes,
+		ImageID:      i.ImageID,
 		CreatedAt:    i.CreatedAt,
 		UpdatedAt:    i.UpdatedAt,
 	}, nil

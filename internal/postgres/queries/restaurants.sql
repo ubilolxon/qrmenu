@@ -42,7 +42,17 @@ SET slug           = COALESCE(sqlc.narg(slug)::citext, slug),
     phone          = COALESCE(sqlc.narg(phone)::text, phone),
     address        = COALESCE(sqlc.narg(address)::text, address),
     theme          = COALESCE(sqlc.narg(theme)::jsonb, theme),
-    is_active      = COALESCE(sqlc.narg(is_active)::boolean, is_active)
+    is_active      = COALESCE(sqlc.narg(is_active)::boolean, is_active),
+    logo_image_id  = CASE WHEN sqlc.arg(clear_logo)::boolean THEN NULL
+                          ELSE COALESCE(sqlc.narg(logo_image_id)::uuid, logo_image_id) END,
+    cover_image_id = CASE WHEN sqlc.arg(clear_cover)::boolean THEN NULL
+                          ELSE COALESCE(sqlc.narg(cover_image_id)::uuid, cover_image_id) END,
+    -- The public menu carries the restaurant's name, description, phone,
+    -- address, theme, logo and cover, so editing any of them changes the
+    -- rendered page. menu_version is the public cache key suffix; without this
+    -- increment a renamed restaurant would keep serving its old menu until the
+    -- cache TTL expired, which is a day.
+    menu_version   = menu_version + 1
 WHERE id = sqlc.arg(id) AND tenant_id = sqlc.arg(tenant_id)
 RETURNING *;
 

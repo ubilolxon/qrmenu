@@ -77,6 +77,8 @@ func ToRestaurant(r gen.Restaurant) (domain.Restaurant, error) {
 		Phone:         r.Phone,
 		Address:       r.Address,
 		Theme:         theme,
+		LogoImageID:   r.LogoImageID,
+		CoverImageID:  r.CoverImageID,
 		MenuVersion:   r.MenuVersion,
 		IsActive:      r.IsActive,
 		CreatedAt:     r.CreatedAt,
@@ -114,6 +116,46 @@ func ToTables(rows []gen.RestaurantTable) []domain.Table {
 	out := make([]domain.Table, len(rows))
 	for i, r := range rows {
 		out[i] = ToTable(r)
+	}
+	return out
+}
+
+// ToImage decodes the variants JSON as it maps.
+//
+// A row whose variants column will not parse is returned with an empty map
+// rather than an error: the image is then missing sizes, and domain.ToPublic
+// refuses to publish it, which is the right outcome. Failing the whole menu
+// read because one photo's metadata is corrupt is not.
+func ToImage(img gen.Image) domain.Image {
+	variants := map[string]domain.ImageVariant{}
+	if len(img.Variants) > 0 {
+		if err := json.Unmarshal(img.Variants, &variants); err != nil {
+			variants = map[string]domain.ImageVariant{}
+		}
+	}
+
+	return domain.Image{
+		ID:           img.ID,
+		RestaurantID: img.RestaurantID,
+		Status:       domain.ImageStatus(img.Status),
+		StorageKey:   img.StorageKey,
+		ContentType:  img.ContentType,
+		ByteSize:     img.ByteSize,
+		Width:        img.Width,
+		Height:       img.Height,
+		Placeholder:  img.Placeholder,
+		Variants:     variants,
+		Error:        img.Error,
+		CreatedAt:    img.CreatedAt,
+		UpdatedAt:    img.UpdatedAt,
+		UploadedAt:   img.UploadedAt,
+	}
+}
+
+func ToImages(rows []gen.Image) []domain.Image {
+	out := make([]domain.Image, len(rows))
+	for i, r := range rows {
+		out[i] = ToImage(r)
 	}
 	return out
 }

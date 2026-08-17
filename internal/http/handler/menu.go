@@ -110,6 +110,7 @@ type itemResponse struct {
 	Allergens   []string  `json:"allergens"`
 	Calories    *int32    `json:"calories"`
 	PrepMinutes *int32    `json:"prep_minutes"`
+	ImageID     *string   `json:"image_id"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -121,6 +122,7 @@ func toItemResponse(i domain.Item) itemResponse {
 		PriceMinor: i.PriceMinor, IsAvailable: i.IsAvailable, SortOrder: i.SortOrder,
 		Tags: orEmpty(i.Tags), Allergens: orEmpty(i.Allergens),
 		Calories: i.Calories, PrepMinutes: i.PrepMinutes,
+		ImageID:   uuidString(i.ImageID),
 		CreatedAt: i.CreatedAt, UpdatedAt: i.UpdatedAt,
 	}
 }
@@ -257,6 +259,8 @@ type itemPatchRequest struct {
 	ClearCalories    bool       `json:"clear_calories"`
 	PrepMinutes      *int32     `json:"prep_minutes"`
 	ClearPrepMinutes bool       `json:"clear_prep_minutes"`
+	ImageID          *string    `json:"image_id"`
+	ClearImage       bool       `json:"clear_image"`
 }
 
 type variantRequest struct {
@@ -655,7 +659,14 @@ func (h Menu) UpdateItem(w http.ResponseWriter, r *http.Request) {
 		Tags: req.Tags, Allergens: req.Allergens,
 		Calories: req.Calories, ClearCalories: req.ClearCalories,
 		PrepMinutes: req.PrepMinutes, ClearPrepMinutes: req.ClearPrepMinutes,
+		ClearImage: req.ClearImage,
 	}
+	imageID, err := optionalUUID(req.ImageID, "image_id")
+	if err != nil {
+		RenderError(w, r, err)
+		return
+	}
+	patch.ImageID = imageID
 	if req.CategoryID != nil {
 		categoryID, err := uuid.Parse(*req.CategoryID)
 		if err != nil {

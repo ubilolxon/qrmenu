@@ -103,7 +103,7 @@ func (q *Queries) GetTable(ctx context.Context, arg GetTableParams) (RestaurantT
 }
 
 const getTableByToken = `-- name: GetTableByToken :one
-SELECT t.id, t.restaurant_id, t.label, t.qr_token, t.seats, t.sort_order, t.is_active, t.created_at, t.updated_at, r.id, r.tenant_id, r.slug, r.name, r.description, r.currency, r.timezone, r.default_locale, r.locales, r.phone, r.address, r.theme, r.menu_version, r.is_active, r.created_at, r.updated_at
+SELECT t.id, t.restaurant_id, t.label, t.qr_token, t.seats, t.sort_order, t.is_active, t.created_at, t.updated_at, r.id, r.tenant_id, r.slug, r.name, r.description, r.currency, r.timezone, r.default_locale, r.locales, r.phone, r.address, r.theme, r.menu_version, r.is_active, r.created_at, r.updated_at, r.logo_image_id, r.cover_image_id
 FROM restaurant_tables t
 JOIN restaurants r ON r.id = t.restaurant_id
 WHERE t.qr_token = $1 AND t.is_active AND r.is_active
@@ -147,6 +147,8 @@ func (q *Queries) GetTableByToken(ctx context.Context, qrToken string) (GetTable
 		&i.Restaurant.IsActive,
 		&i.Restaurant.CreatedAt,
 		&i.Restaurant.UpdatedAt,
+		&i.Restaurant.LogoImageID,
+		&i.Restaurant.CoverImageID,
 	)
 	return i, err
 }

@@ -91,6 +91,14 @@ type RestaurantPatch struct {
 	Address       *string
 	Theme         *map[string]any
 	IsActive      *bool
+
+	// The logo and cover are set by attaching an already-uploaded image. As
+	// with items, the composite foreign key is what enforces that the image
+	// belongs to this restaurant.
+	LogoImageID  *uuid.UUID
+	ClearLogo    bool
+	CoverImageID *uuid.UUID
+	ClearCover   bool
 }
 
 // Update applies a partial change.
@@ -195,6 +203,15 @@ func (s *Restaurant) Update(ctx context.Context, tenantID, id uuid.UUID, patch R
 	}
 	if patch.IsActive != nil {
 		params.IsActive = patch.IsActive
+	}
+
+	params.ClearLogo = patch.ClearLogo
+	if !patch.ClearLogo {
+		params.LogoImageID = patch.LogoImageID
+	}
+	params.ClearCover = patch.ClearCover
+	if !patch.ClearCover {
+		params.CoverImageID = patch.CoverImageID
 	}
 
 	row, err := s.store.UpdateRestaurant(ctx, params)

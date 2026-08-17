@@ -18,6 +18,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
 	"github.com/ubilolxon/qrmenu/internal/service"
+	"github.com/ubilolxon/qrmenu/internal/storage"
 )
 
 type Deps struct {
@@ -32,6 +33,8 @@ type Deps struct {
 	Restaurants *service.Restaurant
 	Menus       *service.Menu
 	Tables      *service.Table
+	Images      *service.Image
+	Files       *storage.Client
 	PublicPages handler.Public
 }
 
@@ -154,6 +157,7 @@ func (d Deps) mountAdmin(r chi.Router) {
 
 				mountMenu(r, handler.NewMenu(d.Menus))
 				mountTables(r, handler.NewTable(d.Tables, d.Config.Public))
+				mountImages(r, handler.NewImage(d.Images, d.Files))
 			})
 		})
 	})
@@ -257,6 +261,31 @@ func mountTables(r chi.Router, h handler.Table) {
 			r.With(editors).Delete("/", h.Delete)
 			r.With(middleware.RequireRole(domain.RoleOwner)).
 				Post("/rotate-token", h.RotateToken)
+		})
+	})
+}
+
+// mountImages is the media library for one restaurant.
+//
+// Uploading is a manager's job, the same as editing the menu it illustrates.
+// There is no separate role for it: someone who can rename a dish can also
+// change its photo, and pretending otherwise would be a permission that looks
+// meaningful without being one.
+func mountImages(r chi.Router, h handler.Image) {
+	editors := middleware.RequireRole(domain.RoleOwner, domain.RoleManager)
+
+	r.Route("/images", func(r chi.Router) {
+		r.With(editors).Get("/", h.List)
+		// Step one of an upload: reserve an id and get a presigned URL.
+		r.With(editors).Post("/", h.CreateUpload)
+		// Registered before /{imageID} so "limits" is not read as an id.
+		r.With(editors).Get("/limits", h.Limits)
+
+		r.Route("/{imageID}", func(r chi.Router) {
+			r.With(editors).Get("/", h.Get)
+			r.With(editors).Delete("/", h.Delete)
+			// Step two: the bytes are in place, verify and publish them.
+			r.With(editors).Post("/complete", h.Complete)
 		})
 	})
 }

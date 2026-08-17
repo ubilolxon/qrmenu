@@ -25,6 +25,8 @@ type Restaurant struct {
 	Phone         *string
 	Address       *string
 	Theme         map[string]any
+	LogoImageID   *uuid.UUID
+	CoverImageID  *uuid.UUID
 	MenuVersion   int32
 	IsActive      bool
 	CreatedAt     time.Time

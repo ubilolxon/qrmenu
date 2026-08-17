@@ -34,6 +34,8 @@ type PublicRestaurant struct {
 	Address       *string        `json:"address"`
 	Theme         map[string]any `json:"theme"`
 	MenuVersion   int32          `json:"menu_version"`
+	Logo          *PublicImage   `json:"logo"`
+	Cover         *PublicImage   `json:"cover"`
 }
 
 type PublicMenuGroup struct {
@@ -68,6 +70,9 @@ type PublicItem struct {
 	PrepMinutes    *int32                `json:"prep_minutes"`
 	Variants       []PublicVariant       `json:"variants"`
 	ModifierGroups []PublicModifierGroup `json:"modifier_groups"`
+	// Nil when the dish has no photo, which is the common case for a menu that
+	// has just been typed in. The page has to read well either way.
+	Image *PublicImage `json:"image"`
 }
 
 type PublicVariant struct {

@@ -36,7 +36,11 @@ SET name         = COALESCE(sqlc.narg(name)::jsonb, name),
                         ELSE COALESCE(sqlc.narg(calories)::integer, calories) END,
     prep_minutes = CASE WHEN sqlc.arg(clear_prep_minutes)::boolean THEN NULL
                         ELSE COALESCE(sqlc.narg(prep_minutes)::integer, prep_minutes) END,
-    category_id  = COALESCE(sqlc.narg(category_id)::uuid, category_id)
+    category_id  = COALESCE(sqlc.narg(category_id)::uuid, category_id),
+    -- The composite foreign key on (image_id, restaurant_id) is what stops one
+    -- restaurant attaching another's photo; there is no check to write here.
+    image_id     = CASE WHEN sqlc.arg(clear_image)::boolean THEN NULL
+                        ELSE COALESCE(sqlc.narg(image_id)::uuid, image_id) END
 WHERE id = sqlc.arg(id) AND restaurant_id = sqlc.arg(restaurant_id)
 RETURNING *;
 

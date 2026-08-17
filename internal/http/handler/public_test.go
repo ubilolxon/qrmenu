@@ -114,7 +114,7 @@ func demoMenu() *domain.PublicMenu {
 func renderPageFor(t *testing.T, path string, menu *domain.PublicMenu, table *domain.PublicTable) string {
 	t.Helper()
 
-	h, err := NewPublic(service.NewPublicMenu(nil, nil, nil), config.Public{})
+	h, err := NewPublic(service.NewPublicMenu(nil, nil, nil, nil), config.Public{})
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}
@@ -422,4 +422,137 @@ func TestAtoiDefault(t *testing.T) {
 			t.Errorf("atoiDefault(%q) = %d, want %d", tt.in, got, tt.want)
 		}
 	}
+}
+
+// Photos on the page.
+//
+// The traps here are all in html/template's contextual escaping rather than in
+// the markup: a URL interpolated into a style attribute goes through the CSS
+// filter, and anything it dislikes is replaced with ZgotmplZ — which renders as
+// a visibly broken page rather than as an error anyone would notice in a test
+// that only checked the status code.
+
+func demoImage(seed string) *domain.PublicImage {
+	base := "https://cdn.example.test/restaurants/r/images/" + seed + "/"
+	return &domain.PublicImage{
+		Thumb:       base + "thumb.jpg",
+		Card:        base + "card.jpg",
+		Full:        base + "full.jpg",
+		Width:       1600,
+		Height:      1200,
+		Placeholder: "#c8a27a",
+	}
+}
+
+// menuWithImages attaches a photo to the first item, plus a logo and a cover.
+func menuWithImages() *domain.PublicMenu {
+	menu := demoMenu()
+	menu.Restaurant.Logo = demoImage("logo")
+	menu.Restaurant.Cover = demoImage("cover")
+	menu.Menus[0].Categories[0].Items[0].Image = demoImage("dish")
+	return menu
+}
+
+func TestMenuPageRendersPhotos(t *testing.T) {
+	html := renderPageFor(t, "/m/choyxona", menuWithImages(), nil)
+
+	if !strings.HasSuffix(strings.TrimSpace(html), "</html>") {
+		t.Fatalf("page is truncated; template aborted mid-render:\n%s", html)
+	}
+
+	want := map[string]string{
+		"photo wrapper":     `class="photo"`,
+		"grid modifier":     "item has-photo",
+		"thumb source":      "images/dish/thumb.jpg",
+		"responsive srcset": `srcset="https://cdn.example.test/restaurants/r/images/dish/thumb.jpg 320w`,
+		"intrinsic size":    `width="1600" height="1200"`,
+		"lazy loading":      `loading="lazy"`,
+		"logo":              "images/logo/card.jpg",
+		"cover background":  "images/cover/full.jpg",
+	}
+	for what, s := range want {
+		if !strings.Contains(html, s) {
+			t.Errorf("page is missing the %s (%q)", what, s)
+		}
+	}
+
+	// ZgotmplZ is what html/template substitutes for a URL it refuses to trust
+	// in a CSS context. It is not an error — the page renders, with the image
+	// silently replaced by the literal string.
+	if strings.Contains(html, "ZgotmplZ") {
+		t.Error("a URL was rejected by the CSS sanitiser; the cover or placeholder will not render")
+	}
+
+	// A decorative image announced to a screen reader as "image" is noise. The
+	// dish name is right beside it and already carries the meaning.
+	if !strings.Contains(html, `alt=""`) {
+		t.Error("the dish photo has no empty alt attribute")
+	}
+}
+
+// The placeholder colour is what stops the page reflowing as photos load, so it
+// has to survive escaping into the style attribute intact.
+func TestMenuPagePlaceholderColourSurvivesEscaping(t *testing.T) {
+	html := renderPageFor(t, "/m/choyxona", menuWithImages(), nil)
+
+	if !strings.Contains(html, "background-color: #c8a27a") {
+		t.Errorf("the placeholder colour did not survive into the style attribute:\n%s",
+			excerpt(html, "class=\"photo\""))
+	}
+}
+
+// A menu with no photos at all is the normal state of a restaurant that has
+// just typed its menu in, and it must not render an empty image box.
+func TestMenuPageWithoutPhotos(t *testing.T) {
+	html := renderPageFor(t, "/m/choyxona", demoMenu(), nil)
+
+	// Matched as class attributes, not bare words: the same names appear in the
+	// inline stylesheet, which is what makes a naive substring check pass on a
+	// page that renders nothing.
+	for _, s := range []string{`class="photo"`, `class="item has-photo`, "srcset", `class="cover"`, `class="logo"`} {
+		if strings.Contains(html, s) {
+			t.Errorf("a menu with no images still rendered %q", s)
+		}
+	}
+}
+
+// A sold-out dish keeps its photo but is visually muted, so a guest can still
+// see what they were looking for.
+func TestMenuPageSoldOutItemKeepsItsPhoto(t *testing.T) {
+	menu := demoMenu()
+	// Norin is the sold-out item in the fixture.
+	var found bool
+	for mi := range menu.Menus {
+		for ci := range menu.Menus[mi].Categories {
+			for ii := range menu.Menus[mi].Categories[ci].Items {
+				item := &menu.Menus[mi].Categories[ci].Items[ii]
+				if !item.IsAvailable {
+					item.Image = demoImage("norin")
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the fixture no longer contains a sold-out item")
+	}
+
+	html := renderPageFor(t, "/m/choyxona", menu, nil)
+	if !strings.Contains(html, "images/norin/thumb.jpg") {
+		t.Error("a sold-out dish lost its photo")
+	}
+	if !strings.Contains(html, "sold-out") {
+		t.Error("a sold-out dish is not marked for the muted styling")
+	}
+}
+
+// excerpt returns the text around a marker, so a failure shows the relevant
+// markup instead of the whole page.
+func excerpt(html, marker string) string {
+	i := strings.Index(html, marker)
+	if i < 0 {
+		return html
+	}
+	end := min(i+400, len(html))
+	return html[i:end]
 }

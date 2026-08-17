@@ -33,6 +33,8 @@ internal/http    router, middleware, handlers, DTOs, public page templates
 internal/cache   Redis (public menu cache; never on a write path)
 internal/money   minor-unit formatting; owns the zero-decimal currency list
 internal/qr      QR rendering — PNG, SVG, printable table tent
+internal/imaging decode, validate and resize uploads — the only untrusted input
+internal/storage object storage (S3/MinIO); the only package that knows a bucket exists
 internal/i18n    locale negotiation and fallback for translated fields
 web/             SPA (separate build)
 deploy/          Dockerfile, docker-compose
@@ -86,6 +88,11 @@ a person may have to type one.
 | GET HEAD | `/t/{token}/qr.png` `qr.svg` `qr.card.svg` | QR for one table |
 | GET HEAD | `/api/v1/public/m/{slug}` | the menu as JSON |
 | GET HEAD | `/api/v1/public/t/{token}` | the menu as JSON, with table context |
+
+Item photos arrive in the payload as three sizes plus an intrinsic width, height
+and average colour. The page uses the last three to reserve the right box before
+the image loads: on a menu of forty dishes, photos arriving one by one otherwise
+push the whole list around while someone is reading it.
 
 `?locale=uz|ru|en` overrides the `Accept-Language` header. `?size=` on a QR
 endpoint is pixels, clamped to 128–2048 (default 512) — rendering is CPU work,
@@ -151,6 +158,19 @@ manager, except where noted.
 Marking a dish sold out is the one menu write that happens mid-service, so
 kitchen and waiting staff can do it without being able to change anything else.
 
+Images, also under `/restaurants/{restaurantID}`:
+
+| Method | Path | Notes |
+|---|---|---|
+| GET POST | `/images` | POST reserves an upload, returns a presigned URL |
+| GET | `/images/limits` | size, type and dimension rules, for client-side checks |
+| GET DELETE | `/images/{imageID}` | |
+| POST | `/images/{imageID}/complete` | verify the bytes and publish |
+
+Attach an image by PATCHing `image_id` onto an item, or `logo_image_id` /
+`cover_image_id` onto the restaurant. `clear_image`, `clear_logo` and
+`clear_cover` remove one.
+
 Tables, also under `/restaurants/{restaurantID}`:
 
 | Method | Path | Notes |
@@ -158,6 +178,54 @@ Tables, also under `/restaurants/{restaurantID}`:
 | GET POST | `/tables` | |
 | GET PATCH DELETE | `/tables/{tableID}` | |
 | POST | `/tables/{tableID}/rotate-token` | **owner only** — breaks printed codes |
+
+## Image uploads
+
+Uploading is two steps, and the split is the point.
+
+**Step one** POSTs the content type and size to `/images`. The API writes a
+`pending` row, derives a storage key from its id, and returns a presigned PUT
+URL. **Step two** is the client uploading the bytes *straight to object storage*
+— the API never carries them. A restaurant adding fifty dish photos would
+otherwise tie up an API worker for each one, over connections that are slow
+precisely because they are phones.
+
+**Step three** POSTs to `/complete`. Only now does the server touch the file: it
+fetches the object, decodes it, generates the three sizes, and flips the row to
+`ready`.
+
+That decode is not a formality. **A presigned PUT enforces nothing about
+content.** Anyone holding a URL signed for `image/jpeg` can upload HTML, and the
+bucket is served publicly — so publishing on the strength of a declared content
+type would be stored XSS on our own origin. The only way to know a file is an
+image is to decode it, and the limits are enforced against what the decoder
+actually finds:
+
+- 10 MiB per file, and 40 million pixels *decoded*. The second is not redundant:
+  a 20 000 × 20 000 PNG is a few hundred KB on disk and 1.6 GB as a raster, so
+  the dimension check is read from the header before the full decode allocates.
+- JPEG, PNG, WebP and GIF. **SVG is refused** — it is a document, it can carry
+  script, and it would be served from a public bucket.
+- At least 100 px on a side, which rejects an icon picked by mistake.
+
+Derivatives are 320 / 800 / 1600 px wide, never upscaled. They come out as JPEG
+unless the source has genuinely translucent pixels, in which case PNG — a logo
+with a cut-out background must not come back with black corners, and a
+photograph must not be paid for at PNG size.
+
+EXIF orientation is applied at decode. A phone does not rotate pixels when you
+turn it sideways; it stores a tag and leaves the raster alone. Ignoring that tag
+is why uploaded food photos come out on their side, and it has to be corrected
+*before* the dimensions are recorded, since orientations 5–8 swap the axes.
+
+A presigned upload that is never completed leaves a pending row and an orphaned
+object. Both are swept hourly, after a two-hour grace period comfortably longer
+than the 15-minute URL lifetime.
+
+The bucket must be readable by whoever serves the images — a CDN in front of it
+in production, anonymous GET locally. `deploy/docker-compose.yml` provisions
+that; a bucket the application creates itself at startup gets the same read-only
+policy, and an existing bucket's policy is never touched.
 
 ## Menu data model
 
@@ -189,7 +257,16 @@ midnight belong to the day the window opened.
 
 Any menu write bumps `restaurants.menu_version` **in the same transaction**.
 That counter is the public cache key suffix, so a write and its cache
-invalidation commit together or not at all.
+invalidation commit together or not at all. Editing the restaurant itself bumps
+it too — its name, phone, address, theme, logo and cover are all part of the
+rendered menu, so a change to any of them has to supersede the cached copy.
+
+Images attach through a composite foreign key on `(image_id, restaurant_id)`,
+the same trick the menu tree uses, so one restaurant cannot reference another's
+photo. The `ON DELETE SET NULL` carries an explicit column list: on a composite
+key an unqualified `SET NULL` nulls *every* column in it, which would mean
+trying to null `items.restaurant_id` — and, on the restaurant side, the primary
+key itself.
 
 ## Auth
 
@@ -240,4 +317,6 @@ be covered there**, or the failure mode is a truncated page nobody notices.
 - **Phase 3** — tables and QR tokens; public menu as HTML and JSON in uz/ru/en;
   QR as PNG, SVG and a printable table tent; Redis cache keyed on `menu_version`;
   ETag/304. This is the first part you can demo on a phone.
-- **Phase 4 next** — image uploads (S3-compatible, presigned PUT).
+- **Phase 4** — image uploads: presigned PUT to object storage, server-side
+  validation and resizing, EXIF orientation, photos on the public menu.
+- **Phase 5 next** — table orders and the staff SSE stream.

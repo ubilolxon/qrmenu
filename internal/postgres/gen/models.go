@@ -23,6 +23,23 @@ type Category struct {
 	UpdatedAt    time.Time
 }
 
+type Image struct {
+	ID           uuid.UUID
+	RestaurantID uuid.UUID
+	Status       string
+	StorageKey   string
+	ContentType  string
+	ByteSize     int64
+	Width        *int32
+	Height       *int32
+	Placeholder  *string
+	Variants     json.RawMessage
+	Error        *string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	UploadedAt   *time.Time
+}
+
 type Item struct {
 	ID           uuid.UUID
 	RestaurantID uuid.UUID
@@ -38,6 +55,7 @@ type Item struct {
 	PrepMinutes  *int32
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	ImageID      *uuid.UUID
 }
 
 type ItemVariant struct {
@@ -121,6 +139,8 @@ type Restaurant struct {
 	IsActive      bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	LogoImageID   *uuid.UUID
+	CoverImageID  *uuid.UUID
 }
 
 type RestaurantTable struct {

@@ -116,6 +116,7 @@ type Item struct {
 	Allergens    []string
 	Calories     *int32
 	PrepMinutes  *int32
+	ImageID      *uuid.UUID
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }

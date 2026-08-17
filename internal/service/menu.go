@@ -482,6 +482,8 @@ type ItemPatch struct {
 	ClearCalories    bool
 	PrepMinutes      *int32
 	ClearPrepMinutes bool
+	ImageID          *uuid.UUID
+	ClearImage       bool
 }
 
 func (s *Menu) UpdateItem(ctx context.Context, tenantID, restaurantID, id uuid.UUID, patch ItemPatch) (domain.Item, error) {
@@ -545,6 +547,7 @@ func (s *Menu) UpdateItem(ctx context.Context, tenantID, restaurantID, id uuid.U
 		CategoryID:       patch.CategoryID,
 		ClearCalories:    patch.ClearCalories,
 		ClearPrepMinutes: patch.ClearPrepMinutes,
+		ClearImage:       patch.ClearImage,
 	}
 	if patch.Name != nil {
 		if params.Name, err = merged.Name.Raw(); err != nil {
@@ -567,6 +570,13 @@ func (s *Menu) UpdateItem(ctx context.Context, tenantID, restaurantID, id uuid.U
 	}
 	if !patch.ClearPrepMinutes {
 		params.PrepMinutes = patch.PrepMinutes
+	}
+	// No ownership check on the image id: the composite foreign key on
+	// (image_id, restaurant_id) makes attaching another restaurant's photo a
+	// constraint violation, which MapError renders as "referenced record does
+	// not exist".
+	if !patch.ClearImage {
+		params.ImageID = patch.ImageID
 	}
 
 	var row gen.Item

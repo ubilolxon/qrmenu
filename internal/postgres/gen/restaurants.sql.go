@@ -51,7 +51,7 @@ INSERT INTO restaurants (
     default_locale, locales, phone, address
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at
+RETURNING id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at, logo_image_id, cover_image_id
 `
 
 type CreateRestaurantParams struct {
@@ -98,6 +98,8 @@ func (q *Queries) CreateRestaurant(ctx context.Context, arg CreateRestaurantPara
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LogoImageID,
+		&i.CoverImageID,
 	)
 	return i, err
 }
@@ -120,7 +122,7 @@ func (q *Queries) DeleteRestaurant(ctx context.Context, arg DeleteRestaurantPara
 }
 
 const getRestaurant = `-- name: GetRestaurant :one
-SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at FROM restaurants
+SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at, logo_image_id, cover_image_id FROM restaurants
 WHERE id = $1 AND tenant_id = $2
 `
 
@@ -149,12 +151,14 @@ func (q *Queries) GetRestaurant(ctx context.Context, arg GetRestaurantParams) (R
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LogoImageID,
+		&i.CoverImageID,
 	)
 	return i, err
 }
 
 const getRestaurantBySlug = `-- name: GetRestaurantBySlug :one
-SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at FROM restaurants
+SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at, logo_image_id, cover_image_id FROM restaurants
 WHERE slug = $1 AND is_active
 `
 
@@ -181,12 +185,14 @@ func (q *Queries) GetRestaurantBySlug(ctx context.Context, slug string) (Restaur
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LogoImageID,
+		&i.CoverImageID,
 	)
 	return i, err
 }
 
 const listRestaurants = `-- name: ListRestaurants :many
-SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at FROM restaurants
+SELECT id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at, logo_image_id, cover_image_id FROM restaurants
 WHERE tenant_id = $1
 ORDER BY created_at
 `
@@ -217,6 +223,8 @@ func (q *Queries) ListRestaurants(ctx context.Context, tenantID uuid.UUID) ([]Re
 			&i.IsActive,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LogoImageID,
+			&i.CoverImageID,
 		); err != nil {
 			return nil, err
 		}
@@ -240,9 +248,19 @@ SET slug           = COALESCE($1::citext, slug),
     phone          = COALESCE($8::text, phone),
     address        = COALESCE($9::text, address),
     theme          = COALESCE($10::jsonb, theme),
-    is_active      = COALESCE($11::boolean, is_active)
-WHERE id = $12 AND tenant_id = $13
-RETURNING id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at
+    is_active      = COALESCE($11::boolean, is_active),
+    logo_image_id  = CASE WHEN $12::boolean THEN NULL
+                          ELSE COALESCE($13::uuid, logo_image_id) END,
+    cover_image_id = CASE WHEN $14::boolean THEN NULL
+                          ELSE COALESCE($15::uuid, cover_image_id) END,
+    -- The public menu carries the restaurant's name, description, phone,
+    -- address, theme, logo and cover, so editing any of them changes the
+    -- rendered page. menu_version is the public cache key suffix; without this
+    -- increment a renamed restaurant would keep serving its old menu until the
+    -- cache TTL expired, which is a day.
+    menu_version   = menu_version + 1
+WHERE id = $16 AND tenant_id = $17
+RETURNING id, tenant_id, slug, name, description, currency, timezone, default_locale, locales, phone, address, theme, menu_version, is_active, created_at, updated_at, logo_image_id, cover_image_id
 `
 
 type UpdateRestaurantParams struct {
@@ -257,6 +275,10 @@ type UpdateRestaurantParams struct {
 	Address       *string
 	Theme         []byte
 	IsActive      *bool
+	ClearLogo     bool
+	LogoImageID   *uuid.UUID
+	ClearCover    bool
+	CoverImageID  *uuid.UUID
 	ID            uuid.UUID
 	TenantID      uuid.UUID
 }
@@ -277,6 +299,10 @@ func (q *Queries) UpdateRestaurant(ctx context.Context, arg UpdateRestaurantPara
 		arg.Address,
 		arg.Theme,
 		arg.IsActive,
+		arg.ClearLogo,
+		arg.LogoImageID,
+		arg.ClearCover,
+		arg.CoverImageID,
 		arg.ID,
 		arg.TenantID,
 	)
@@ -298,6 +324,8 @@ func (q *Queries) UpdateRestaurant(ctx context.Context, arg UpdateRestaurantPara
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LogoImageID,
+		&i.CoverImageID,
 	)
 	return i, err
 }

@@ -329,6 +329,9 @@ type itemView struct {
 	Variants       []domain.PublicVariant
 	VariantLine    string
 	ModifierGroups []modifierGroupView
+	// Nil for a dish with no photo. Most menus start that way, so the layout
+	// has to hold up with any mix of illustrated and plain rows.
+	Image *domain.PublicImage
 }
 
 type modifierGroupView struct {
@@ -369,6 +372,7 @@ func buildMenuPage(r *http.Request, menu *domain.PublicMenu, table *domain.Publi
 					Variants:       it.Variants,
 					VariantLine:    variantLine(it.Variants, currency),
 					ModifierGroups: modifierGroupViews(it.ModifierGroups, currency),
+					Image:          it.Image,
 				})
 			}
 			categories = append(categories, categoryView{Name: c.Name, Items: items})

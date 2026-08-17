@@ -24,6 +24,16 @@ type PublicMenu struct {
 	cache  *redis.Client
 	ttl    time.Duration
 	logger *slog.Logger
+	media  MediaURLs
+}
+
+// MediaURLs turns a storage key into the address a browser fetches it from.
+//
+// A narrow interface rather than the storage client itself: assembling a menu
+// needs to name an object, not to read, write or delete one, and a test should
+// not have to stand up a bucket to render a page.
+type MediaURLs interface {
+	PublicURL(key string) string
 }
 
 // DefaultCacheTTL is a backstop, not the invalidation mechanism. Correctness
@@ -31,8 +41,11 @@ type PublicMenu struct {
 // never read after a write. The TTL only stops superseded keys accumulating.
 const DefaultCacheTTL = 24 * time.Hour
 
-func NewPublicMenu(store *postgres.Store, cache *redis.Client, logger *slog.Logger) *PublicMenu {
-	return &PublicMenu{store: store, cache: cache, ttl: DefaultCacheTTL, logger: logger}
+// media may be nil, in which case the menu is assembled without images. That is
+// the degraded mode for a deployment with no object storage configured: a menu
+// with no photos still serves.
+func NewPublicMenu(store *postgres.Store, cache *redis.Client, logger *slog.Logger, media MediaURLs) *PublicMenu {
+	return &PublicMenu{store: store, cache: cache, ttl: DefaultCacheTTL, logger: logger, media: media}
 }
 
 // BySlug serves the restaurant's plain menu URL.
@@ -170,6 +183,30 @@ func (s *PublicMenu) assemble(ctx context.Context, restaurant gen.Restaurant, lo
 	if err != nil {
 		return nil, wrap("list modifiers", err)
 	}
+	// Only ready images are returned, so a pending or rejected upload cannot
+	// reach a guest's page even if something has already attached it.
+	imageRows, err := s.store.ListReadyImages(ctx, id)
+	if err != nil {
+		return nil, wrap("list images", err)
+	}
+
+	imagesByID := make(map[uuid.UUID]domain.Image, len(imageRows))
+	for _, row := range imageRows {
+		imagesByID[row.ID] = postgres.ToImage(row)
+	}
+	// picture resolves an attachment to the public form, and returns nil for
+	// anything missing, unfinished or unresolvable — a half-built image must
+	// never render as a broken box on a menu.
+	picture := func(imageID *uuid.UUID) *domain.PublicImage {
+		if imageID == nil || s.media == nil {
+			return nil
+		}
+		img, ok := imagesByID[*imageID]
+		if !ok {
+			return nil
+		}
+		return img.ToPublic(s.media.PublicURL)
+	}
 
 	fallback := restaurant.DefaultLocale
 	text := func(raw []byte) string {
@@ -228,6 +265,7 @@ func (s *PublicMenu) assemble(ctx context.Context, restaurant gen.Restaurant, lo
 			PrepMinutes:    it.PrepMinutes,
 			Variants:       orEmptySlice(variantsByItem[it.ID]),
 			ModifierGroups: orEmptySlice(groupsByItem[it.ID]),
+			Image:          picture(it.ImageID),
 		})
 	}
 
@@ -290,6 +328,8 @@ func (s *PublicMenu) assemble(ctx context.Context, restaurant gen.Restaurant, lo
 			Address:       restaurant.Address,
 			Theme:         theme,
 			MenuVersion:   restaurant.MenuVersion,
+			Logo:          picture(restaurant.LogoImageID),
+			Cover:         picture(restaurant.CoverImageID),
 		},
 		Menus: menus,
 	}, nil
