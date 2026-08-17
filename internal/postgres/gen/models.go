@@ -109,6 +109,48 @@ type ModifierGroup struct {
 	UpdatedAt    time.Time
 }
 
+type Order struct {
+	ID              uuid.UUID
+	RestaurantID    uuid.UUID
+	TableID         *uuid.UUID
+	TableLabel      string
+	CodeSeq         int32
+	BusinessDay     time.Time
+	Status          string
+	GuestSessionID  string
+	Locale          string
+	Note            *string
+	SubtotalMinor   int64
+	ServiceFeeMinor int64
+	TotalMinor      int64
+	Currency        string
+	IdempotencyKey  *string
+	PlacedAt        time.Time
+	AcceptedAt      *time.Time
+	ReadyAt         *time.Time
+	ClosedAt        *time.Time
+	CancelReason    *string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type OrderItem struct {
+	ID                  uuid.UUID
+	OrderID             uuid.UUID
+	RestaurantID        uuid.UUID
+	ItemID              *uuid.UUID
+	VariantID           *uuid.UUID
+	Qty                 int32
+	UnitPriceMinor      int64
+	LineTotalMinor      int64
+	NameSnapshot        json.RawMessage
+	VariantNameSnapshot []byte
+	Modifiers           json.RawMessage
+	Note                *string
+	SortOrder           int32
+	CreatedAt           time.Time
+}
+
 type RefreshToken struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
@@ -174,4 +216,19 @@ type User struct {
 	LastLoginAt  *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type WaiterCall struct {
+	ID             uuid.UUID
+	RestaurantID   uuid.UUID
+	TableID        *uuid.UUID
+	TableLabel     string
+	Kind           string
+	Status         string
+	GuestSessionID string
+	Note           *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	AcknowledgedAt *time.Time
+	ResolvedAt     *time.Time
 }

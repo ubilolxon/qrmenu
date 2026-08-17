@@ -60,6 +60,8 @@ type Querier interface {
 	CreateMenu(ctx context.Context, arg CreateMenuParams) (Menu, error)
 	CreateModifier(ctx context.Context, arg CreateModifierParams) (Modifier, error)
 	CreateModifierGroup(ctx context.Context, arg CreateModifierGroupParams) (ModifierGroup, error)
+	CreateOrder(ctx context.Context, arg CreateOrderParams) (Order, error)
+	CreateOrderItem(ctx context.Context, arg CreateOrderItemParams) (OrderItem, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateRestaurant(ctx context.Context, arg CreateRestaurantParams) (Restaurant, error)
 	CreateTable(ctx context.Context, arg CreateTableParams) (RestaurantTable, error)
@@ -68,6 +70,8 @@ type Querier interface {
 	// Variants (sizes) and modifier groups/modifiers (extras) both hang off an
 	// item and follow the same scoping rule as everything else.
 	CreateVariant(ctx context.Context, arg CreateVariantParams) (ItemVariant, error)
+	// ------------------------------------------------------------- waiter calls
+	CreateWaiterCall(ctx context.Context, arg CreateWaiterCallParams) (WaiterCall, error)
 	DeleteCategory(ctx context.Context, arg DeleteCategoryParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	// Returns the row so the caller knows which storage prefix to clear. Anything
@@ -84,12 +88,30 @@ type Querier interface {
 	DeleteTable(ctx context.Context, arg DeleteTableParams) (int64, error)
 	DeleteUser(ctx context.Context, arg DeleteUserParams) (int64, error)
 	DeleteVariant(ctx context.Context, arg DeleteVariantParams) (int64, error)
+	// The dedupe lookup: a guest pressing the button again while the first call is
+	// still live gets that call back instead of adding a second row to the screen.
+	//
+	FindOpenWaiterCall(ctx context.Context, arg FindOpenWaiterCallParams) (WaiterCall, error)
 	GetCategory(ctx context.Context, arg GetCategoryParams) (Category, error)
 	GetImage(ctx context.Context, arg GetImageParams) (Image, error)
 	GetItem(ctx context.Context, arg GetItemParams) (Item, error)
 	GetMenu(ctx context.Context, arg GetMenuParams) (Menu, error)
 	GetModifier(ctx context.Context, arg GetModifierParams) (Modifier, error)
 	GetModifierGroup(ctx context.Context, arg GetModifierGroupParams) (ModifierGroup, error)
+	GetOrder(ctx context.Context, arg GetOrderParams) (Order, error)
+	// The replay lookup. Scoped to the table, because two guests at different
+	// tables choosing the same key is a coincidence, not a retry.
+	//
+	GetOrderByIdempotencyKey(ctx context.Context, arg GetOrderByIdempotencyKeyParams) (Order, error)
+	// A guest's own order. The session id is the credential: without it there is
+	// nothing to check, since the guest never logged in.
+	//
+	GetOrderForGuest(ctx context.Context, arg GetOrderForGuestParams) (Order, error)
+	// Staff reach an order by its id alone, so the tenant check has to happen in
+	// the query. Joining through restaurants is what stops one tenant's waiter
+	// patching another tenant's order by pasting an id.
+	//
+	GetOrderForTenant(ctx context.Context, arg GetOrderForTenantParams) (GetOrderForTenantRow, error)
 	// Looked up by hash, never by the token itself — only the SHA-256 is stored.
 	//
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (RefreshToken, error)
@@ -121,8 +143,11 @@ type Querier interface {
 	//
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetVariant(ctx context.Context, arg GetVariantParams) (ItemVariant, error)
+	GetWaiterCall(ctx context.Context, arg GetWaiterCallParams) (WaiterCall, error)
+	GetWaiterCallForTenant(ctx context.Context, arg GetWaiterCallForTenantParams) (GetWaiterCallForTenantRow, error)
 	ListCategories(ctx context.Context, arg ListCategoriesParams) ([]Category, error)
 	ListCategoriesByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Category, error)
+	ListGuestOrders(ctx context.Context, arg ListGuestOrdersParams) ([]Order, error)
 	ListImages(ctx context.Context, arg ListImagesParams) ([]Image, error)
 	ListItems(ctx context.Context, arg ListItemsParams) ([]Item, error)
 	// Loads every item for a restaurant in one scan. Phase 3 builds the whole
@@ -133,8 +158,32 @@ type Querier interface {
 	ListMenus(ctx context.Context, restaurantID uuid.UUID) ([]Menu, error)
 	ListModifierGroups(ctx context.Context, arg ListModifierGroupsParams) ([]ModifierGroup, error)
 	ListModifierGroupsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ModifierGroup, error)
+	ListModifierGroupsForItems(ctx context.Context, arg ListModifierGroupsForItemsParams) ([]ModifierGroup, error)
 	ListModifiers(ctx context.Context, arg ListModifiersParams) ([]Modifier, error)
 	ListModifiersByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Modifier, error)
+	ListModifiersForGroups(ctx context.Context, arg ListModifiersForGroupsParams) ([]Modifier, error)
+	// The kitchen screen. Oldest first: the order that has been waiting longest is
+	// the one that needs attention, which is the opposite of every other list in
+	// the product.
+	//
+	ListOpenOrders(ctx context.Context, restaurantID uuid.UUID) ([]Order, error)
+	ListOpenWaiterCalls(ctx context.Context, restaurantID uuid.UUID) ([]WaiterCall, error)
+	ListOrderItems(ctx context.Context, orderID uuid.UUID) ([]OrderItem, error)
+	// Lines for a whole screenful of orders in one query, so listing N orders is
+	// two round trips instead of N+1.
+	//
+	ListOrderItemsForOrders(ctx context.Context, orderIds []uuid.UUID) ([]OrderItem, error)
+	// ------------------------------------------------------------------ catalog
+	//
+	// The order path reads the menu by id rather than reusing the public menu's
+	// whole-restaurant scans: a two-line cart should not pull a four-hundred-item
+	// menu through the connection to price it.
+	// Brings the category and menu along, because whether a dish can be ordered
+	// depends on both — a dish in a switched-off category, or on a menu outside its
+	// serving window, is not orderable no matter what the item row says.
+	//
+	ListOrderableItems(ctx context.Context, arg ListOrderableItemsParams) ([]ListOrderableItemsRow, error)
+	ListOrdersByDay(ctx context.Context, arg ListOrdersByDayParams) ([]Order, error)
 	// ListReadyImages feeds the public menu. Only 'ready' rows are returned, so a
 	// pending or failed upload can never reach a guest's page.
 	//
@@ -149,6 +198,7 @@ type Querier interface {
 	ListUsers(ctx context.Context, tenantID uuid.UUID) ([]User, error)
 	ListVariants(ctx context.Context, arg ListVariantsParams) ([]ItemVariant, error)
 	ListVariantsByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]ItemVariant, error)
+	ListVariantsForItems(ctx context.Context, arg ListVariantsForItemsParams) ([]ItemVariant, error)
 	// A failed row is kept rather than deleted so the client can be told why. The
 	// message is user-facing and must not carry internal detail.
 	//
@@ -158,6 +208,23 @@ type Querier interface {
 	// a no-success would report a spurious failure for a retry that in fact worked.
 	//
 	MarkImageReady(ctx context.Context, arg MarkImageReadyParams) (Image, error)
+	// Orders, their lines, and the waiter-call button.
+	// Allocates the next daily order number, and reports the restaurant's own
+	// clock in the same round trip.
+	//
+	// Both come from Postgres rather than Go on purpose. The business day depends
+	// on the restaurant's timezone, and Postgres carries the full tzdata while a
+	// scratch container running the API may carry none at all — a missing zone in
+	// Go silently degrades to UTC, which would roll the order numbers over at
+	// 05:00 in Tashkent. local_now rides along because the menu serving-window
+	// check needs the same clock, and taking it from a second source would let the
+	// two disagree.
+	//
+	// The count is scoped to today, so the number restarts every morning. Two
+	// orders can still race to the same value; orders_code_uniq is what makes that
+	// safe, and the service retries.
+	//
+	NextOrderCode(ctx context.Context, arg NextOrderCodeParams) (NextOrderCodeRow, error)
 	ReorderCategories(ctx context.Context, arg ReorderCategoriesParams) (int64, error)
 	ReorderItems(ctx context.Context, arg ReorderItemsParams) (int64, error)
 	// Bulk reorder in one round trip. The array's order IS the new order --
@@ -189,6 +256,18 @@ type Querier interface {
 	UpdateMenu(ctx context.Context, arg UpdateMenuParams) (Menu, error)
 	UpdateModifier(ctx context.Context, arg UpdateModifierParams) (Modifier, error)
 	UpdateModifierGroup(ctx context.Context, arg UpdateModifierGroupParams) (ModifierGroup, error)
+	// Compare-and-set on the status.
+	//
+	// The WHERE clause pins the status the caller believed the order was in, so two
+	// waiters tapping "ready" at the same moment produce one update and one
+	// no-rows, rather than both succeeding and the second silently overwriting a
+	// decision made in between. Checking the transition in Go and then updating
+	// unconditionally would leave exactly that window open.
+	//
+	// The timestamps are set once and never overwritten: accepted_at should say
+	// when the order was first taken on, not when someone last touched the row.
+	//
+	UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusParams) (Order, error)
 	// Partial update: every field is nullable, and a NULL argument means "leave
 	// this alone". The casts are required for sqlc to infer a type for an argument
 	// that only ever appears inside COALESCE.
@@ -197,6 +276,9 @@ type Querier interface {
 	UpdateTable(ctx context.Context, arg UpdateTableParams) (RestaurantTable, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
 	UpdateVariant(ctx context.Context, arg UpdateVariantParams) (ItemVariant, error)
+	// Same compare-and-set shape as orders, for the same reason.
+	//
+	UpdateWaiterCallStatus(ctx context.Context, arg UpdateWaiterCallStatusParams) (WaiterCall, error)
 }
 
 var _ Querier = (*Queries)(nil)

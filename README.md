@@ -36,6 +36,8 @@ internal/qr      QR rendering — PNG, SVG, printable table tent
 internal/imaging decode, validate and resize uploads — the only untrusted input
 internal/storage object storage (S3/MinIO); the only package that knows a bucket exists
 internal/i18n    locale negotiation and fallback for translated fields
+internal/realtime  the SSE hub — one goroutine-safe registry per restaurant
+internal/ratelimit Redis token bucket for the unauthenticated write endpoints
 web/             SPA (separate build)
 deploy/          Dockerfile, docker-compose
 ```
@@ -73,7 +75,7 @@ matters is a query missing its scope, so:
 ## API
 
 Three surfaces: public (unauthenticated, cached), admin (`/api/v1/admin`, JWT),
-and staff (Phase 5).
+and staff (`/api/v1/staff`, JWT, long-lived SSE).
 
 ### Public
 
@@ -88,6 +90,10 @@ a person may have to type one.
 | GET HEAD | `/t/{token}/qr.png` `qr.svg` `qr.card.svg` | QR for one table |
 | GET HEAD | `/api/v1/public/m/{slug}` | the menu as JSON |
 | GET HEAD | `/api/v1/public/t/{token}` | the menu as JSON, with table context |
+| POST | `/api/v1/public/t/{token}/orders` | place an order for that table |
+| GET | `/api/v1/public/t/{token}/orders` | this guest's orders here |
+| POST | `/api/v1/public/t/{token}/call-waiter` | `{"kind":"waiter"\|"bill"\|"help"}` |
+| GET | `/api/v1/public/orders/{orderID}` | one order, for the guest who placed it |
 
 Item photos arrive in the payload as three sizes plus an intrinsic width, height
 and average colour. The page uses the last three to reserve the right box before
@@ -178,6 +184,92 @@ Tables, also under `/restaurants/{restaurantID}`:
 | GET POST | `/tables` | |
 | GET PATCH DELETE | `/tables/{tableID}` | |
 | POST | `/tables/{tableID}/rotate-token` | **owner only** — breaks printed codes |
+
+### Staff
+
+Waiter and kitchen devices. All four roles reach these routes — the kitchen has
+to see orders and the waiting staff have to answer calls — but what each role may
+*do* is narrower, and that is enforced per status rather than per route.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/staff/stream?restaurant_id=` | SSE; held open for a shift |
+| GET | `/api/v1/staff/orders?restaurant_id=` | the open board, oldest first |
+| PATCH | `/api/v1/staff/orders/{orderID}/status` | `{"status":"…","reason":"…"}` |
+| GET | `/api/v1/staff/calls?restaurant_id=` | live waiter calls |
+| PATCH | `/api/v1/staff/calls/{callID}/status` | `pending → acknowledged → resolved` |
+
+**The stream authenticates with the `Authorization` header, so a browser's
+built-in `EventSource` cannot be used** — it cannot set headers. Read it with
+`fetch()` and a `ReadableStream`. Passing the token as a query parameter would
+write a live credential into every access log, proxy log and `Referer` between
+the server and the tablet, and those logs outlive the token.
+
+Events: `ready` (on connect), `resync` (this connection lost events),
+`order.created`, `order.updated`, `waiter.called`, `waiter.updated`. Order and
+call payloads are byte-for-byte the shape the REST endpoints return, so a client
+has one type to handle rather than two.
+
+`ready` and `resync` both mean **load the board now**. The hub keeps no history,
+so `Last-Event-ID` cannot be honoured and is ignored; refetching is the only
+honest recovery, and making it the answer to both means one code path. Event
+`id`s are strictly increasing, so a gap is detectable. A comment heartbeat goes
+out every 20s to stop proxies closing an idle connection.
+
+## Table orders
+
+**Every amount is computed by the server.** The client sends item, variant and
+modifier ids plus quantities — and nothing else. Unknown fields are rejected
+outright, so a request carrying `price_minor` is a 400 rather than something to
+be quietly ignored. Trusting a client-sent total is how you get a zero-som order.
+
+Before pricing, each line is checked against the live menu: the dish exists in
+*this* restaurant, is in stock, its category is active, and its menu is inside
+its serving window right now. That last one matters because the public menu is
+deliberately time-independent and cached — a guest's cart may be minutes old and
+the breakfast menu may have closed while they were reading it.
+
+The restaurant's clock and its business day both come from Postgres in a single
+query, not from Go. Postgres carries the full tzdata; a scratch container running
+the API may carry none, and a missing zone in Go silently degrades to UTC — which
+would roll the daily order numbers over at 05:00 in Tashkent.
+
+**Snapshots.** An order records the item name (all translations), the variant,
+every modifier with its price, the table label and the currency. None of it is
+re-derived from the live menu, so repricing a dish tomorrow — or deleting it —
+leaves yesterday's receipt intact. `item_id` and `variant_id` are kept for
+reporting and go null when the dish is deleted; nothing rendered depends on them.
+
+**Status machine**, as a table in `domain/order.go`:
+
+```
+pending → accepted → preparing → ready → served → closed
+        ↘ cancelled, from any state before served
+```
+
+Once food is on the table, cancelling it is a refund, not a status change.
+Three checks apply to every move: the tenant owns the order, the role may set
+that status, and the move is legal from where the order is. The last is then
+re-applied in the `UPDATE`'s `WHERE` clause, so two waiters tapping at the same
+moment produce one update and one 409 rather than both succeeding.
+
+**Idempotency.** Send `Idempotency-Key` on order creation; a replay within 10
+minutes returns the original order with **200** instead of creating a second one
+with 201. The same distinction applies to the waiter-call button: pressing it
+while a call is already live returns that call with 200, and only one live call
+per table per kind can exist — five presses must not put five rows on the staff
+screen.
+
+**Guest identity** is an opaque 32-byte cookie (`qrmenu_guest`, HttpOnly,
+SameSite=Lax), minted on the first order rather than on the menu page. It is the
+only credential in the flow, so a mismatch reads as 404 rather than 403 — a 403
+would confirm the order exists. It appears in no response body.
+
+Order creation and waiter calls are rate limited per **table** (10/min and 5/min)
+rather than per IP: everyone in the restaurant shares one NAT address, so an IP
+limit would let the first table's rush silence the room. The limiter fails
+**open** — Redis is a cache here as everywhere else, and a restaurant unable to
+take any orders because a cache is down is worse than the spam it prevents.
 
 ## Image uploads
 
@@ -307,6 +399,13 @@ that at compile time, so the test executes the template and checks the output
 still ends in `</html>`. **Any change to `menu.gohtml` or the view model should
 be covered there**, or the failure mode is a truncated page nobody notices.
 
+`internal/domain/order_test.go` pins the pricing rules and the status machine
+without a database, because they are pure functions of (menu, cart) by design —
+that is what `domain.Catalog` exists for. `internal/realtime/hub_test.go` covers
+what a hub gets wrong: a send landing on a closed channel, a wedged subscriber
+blocking the publisher, and events crossing between restaurants. Run it with
+`-race`, which is how CI runs it.
+
 ## Status
 
 - **Phase 0** — skeleton, config, migrations, health, compose, CI.
@@ -319,4 +418,7 @@ be covered there**, or the failure mode is a truncated page nobody notices.
   ETag/304. This is the first part you can demo on a phone.
 - **Phase 4** — image uploads: presigned PUT to object storage, server-side
   validation and resizing, EXIF orientation, photos on the public menu.
-- **Phase 5 next** — table orders and the staff SSE stream.
+- **Phase 5** — table orders: server-side pricing, cart validation against the
+  live menu, snapshotted line items, daily order numbers, idempotent placement,
+  the status machine, waiter calls, and the staff SSE stream.
+- **Phase 6 next** — plans, limits and payment-provider webhooks.

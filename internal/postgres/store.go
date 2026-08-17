@@ -107,6 +107,17 @@ func constraintLabel(constraint string) string {
 		return "qr token already exists"
 	case "restaurant_tables_label_uniq":
 		return "a table with that label already exists"
+	case "orders_code_uniq":
+		// Not user-facing either: the daily order number is allocated as max+1
+		// and two simultaneous orders can pick the same one, so the service
+		// retries. "order number" is the phrase that retry check matches.
+		return "order number already taken"
+	case "orders_idempotency_uniq":
+		// Reached when the same retry arrives twice at once. The caller looks
+		// for "idempotency" and returns the order that won the race.
+		return "idempotency key already used"
+	case "waiter_calls_open_uniq":
+		return "a call is already open for this table"
 	default:
 		return "record already exists"
 	}

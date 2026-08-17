@@ -110,10 +110,10 @@ func TestErrorEnvelopeShape(t *testing.T) {
 		{"unknown route", http.MethodGet, "/nope", http.StatusNotFound, "NOT_FOUND"},
 		{"wrong method", http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "BAD_REQUEST"},
 		{"unbuilt public route", http.MethodGet, "/api/v1/public/x", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
-		{"unbuilt staff route", http.MethodGet, "/api/v1/staff/x", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
-		// Admin is built, so an unknown path under it is a genuine 404 rather
-		// than a not-yet-implemented surface.
+		// Admin and staff are built, so an unknown path under either is a
+		// genuine 404 rather than a not-yet-implemented surface.
 		{"unknown admin route", http.MethodGet, "/api/v1/admin/x", http.StatusNotFound, "NOT_FOUND"},
+		{"unknown staff route", http.MethodGet, "/api/v1/staff/x", http.StatusNotFound, "NOT_FOUND"},
 		{"unbuilt webhook", http.MethodGet, "/webhooks/stripe", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
 	}
 
@@ -217,6 +217,29 @@ func TestAdminRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodGet, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
 		{http.MethodPatch, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
 		{http.MethodDelete, "/api/v1/admin/restaurants/" + uuid.NewString() + "/"},
+	}
+
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			resp := do(t, testRouter(t), rt.method, rt.path, nil)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// The staff surface is where a missing auth check would be worst: the stream
+// pushes every order in a restaurant, live, to whoever is holding the socket.
+// The nil service in testRouter is what makes this assertion strong — anything
+// that reaches a handler panics rather than quietly returning something.
+func TestStaffRoutesRequireAuthentication(t *testing.T) {
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/staff/stream?restaurant_id=" + uuid.NewString()},
+		{http.MethodGet, "/api/v1/staff/orders?restaurant_id=" + uuid.NewString()},
+		{http.MethodPatch, "/api/v1/staff/orders/" + uuid.NewString() + "/status"},
+		{http.MethodGet, "/api/v1/staff/calls?restaurant_id=" + uuid.NewString()},
+		{http.MethodPatch, "/api/v1/staff/calls/" + uuid.NewString() + "/status"},
 	}
 
 	for _, rt := range routes {

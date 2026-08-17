@@ -19,6 +19,8 @@ import (
 	apphttp "github.com/ubilolxon/qrmenu/internal/http"
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/postgres"
+	"github.com/ubilolxon/qrmenu/internal/ratelimit"
+	"github.com/ubilolxon/qrmenu/internal/realtime"
 	"github.com/ubilolxon/qrmenu/internal/service"
 	"github.com/ubilolxon/qrmenu/internal/storage"
 )
@@ -101,6 +103,12 @@ func run() error {
 
 	images := service.NewImage(store, files, logger)
 
+	// One hub per process. Every staff device connected to this instance
+	// subscribes to it; see internal/realtime for what running more than one
+	// instance would take.
+	hub := realtime.New()
+	orders := service.NewOrder(store, hub, logger)
+
 	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger, files), cfg.Public)
 	if err != nil {
 		return fmt.Errorf("build public handler: %w", err)
@@ -118,7 +126,9 @@ func run() error {
 		Menus:       service.NewMenu(store),
 		Tables:      service.NewTable(store),
 		Images:      images,
+		Orders:      orders,
 		Files:       files,
+		Limiter:     ratelimit.New(rdb, logger),
 		PublicPages: publicPages,
 	})
 

@@ -47,6 +47,18 @@ sql:
               type: "time.Time"
               pointer: true
 
+          # Same reasoning for the two zoneless types the order path uses:
+          # orders.business_day is a date, and the restaurant's local clock
+          # comes back as a plain timestamp. Left alone they arrive as
+          # pgtype.Date and pgtype.Timestamp, which would put a driver type in
+          # every order struct for no gain — a business day is a day.
+          - db_type: "date"
+            go_type: "time.Time"
+          # Spelled with the catalog prefix: plain "timestamp" is not matched,
+          # unlike "timestamptz" and "date" above.
+          - db_type: "pg_catalog.timestamp"
+            go_type: "time.Time"
+
           # jsonb translation fields are handled by internal/i18n, which knows
           # the locale-fallback rules. Keeping them as raw bytes here stops sqlc
           # from guessing at a shape.

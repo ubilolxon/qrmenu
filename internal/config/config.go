@@ -36,6 +36,14 @@ type Public struct {
 	// fetches a new one, so a cache expiry never becomes a latency spike at the
 	// start of a dinner rush.
 	StaleWhileRevalidate time.Duration
+
+	// GuestCookieName holds the opaque session that ties an anonymous guest to
+	// the orders they placed. It is the only credential in that flow.
+	GuestCookieName string
+	// GuestSessionTTL outlives a meal by a wide margin, so a guest who closes
+	// the tab and comes back can still see their order, and expires soon enough
+	// that a shared family phone does not carry it for a year.
+	GuestSessionTTL time.Duration
 }
 
 type Auth struct {
@@ -138,6 +146,8 @@ func Load() (Config, error) {
 			BaseURL:              strings.TrimRight(l.str("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 			CacheMaxAge:          l.dur("PUBLIC_CACHE_MAX_AGE", 60*time.Second),
 			StaleWhileRevalidate: l.dur("PUBLIC_STALE_WHILE_REVALIDATE", 300*time.Second),
+			GuestCookieName:      l.str("PUBLIC_GUEST_COOKIE_NAME", "qrmenu_guest"),
+			GuestSessionTTL:      l.dur("PUBLIC_GUEST_SESSION_TTL", 7*24*time.Hour),
 		},
 	}
 

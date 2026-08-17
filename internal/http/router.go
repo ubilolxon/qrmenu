@@ -17,6 +17,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/ratelimit"
 	"github.com/ubilolxon/qrmenu/internal/service"
 	"github.com/ubilolxon/qrmenu/internal/storage"
 )
@@ -34,7 +35,9 @@ type Deps struct {
 	Menus       *service.Menu
 	Tables      *service.Table
 	Images      *service.Image
+	Orders      *service.Order
 	Files       *storage.Client
+	Limiter     *ratelimit.Limiter
 	PublicPages handler.Public
 }
 
@@ -83,8 +86,22 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		// Guests scanning a QR code. No auth, heavily cached, ETag-validated.
 		r.Route("/public", func(r chi.Router) {
+			orders := handler.NewOrder(d.Orders, d.Config.Public, d.Config.Auth.CookieSecure, d.Limiter)
+
 			r.Get("/m/{slug}", d.PublicPages.MenuBySlug)
 			r.Get("/t/{token}", d.PublicPages.MenuByToken)
+
+			// Ordering hangs off the table token, never off a table id: the
+			// token is the only table identifier a guest ever sees, and it is
+			// unguessable, so there is nothing here to enumerate or spoof.
+			r.Post("/t/{token}/orders", orders.Place)
+			r.Get("/t/{token}/orders", orders.MyOrders)
+			r.Post("/t/{token}/call-waiter", orders.CallWaiter)
+
+			// Reading one order back is authorised by the guest's cookie, so it
+			// needs no table context.
+			r.Get("/orders/{orderID}", orders.Get)
+
 			r.NotFound(notImplemented)
 		})
 
@@ -92,9 +109,9 @@ func NewRouter(d Deps) http.Handler {
 			d.mountAdmin(r)
 		})
 
-		// Waiter and kitchen devices, including the SSE stream. (Phase 5)
+		// Waiter and kitchen devices, including the SSE stream.
 		r.Route("/staff", func(r chi.Router) {
-			r.NotFound(notImplemented)
+			d.mountStaff(r)
 		})
 	})
 
@@ -160,6 +177,34 @@ func (d Deps) mountAdmin(r chi.Router) {
 				mountImages(r, handler.NewImage(d.Images, d.Files))
 			})
 		})
+	})
+}
+
+// mountStaff builds the service-floor API.
+//
+// All four roles reach it, which is the point: the kitchen has to see orders
+// and the waiting staff have to answer calls, and neither should need a
+// manager's credentials to do their own job. What each role may *do* is
+// narrower than what they may see, and that is enforced per status in
+// domain.RoleCanSetOrderStatus rather than here — a route cannot express "may
+// set ready but not closed".
+func (d Deps) mountStaff(r chi.Router) {
+	staff := handler.NewStaff(d.Orders)
+	onFloor := middleware.RequireRole(
+		domain.RoleOwner, domain.RoleManager, domain.RoleWaiter, domain.RoleKitchen)
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Authenticate(d.Issuer))
+		r.Use(onFloor)
+
+		// The live stream. Held open for the length of a shift.
+		r.Get("/stream", staff.Stream)
+
+		r.Get("/orders", staff.Orders)
+		r.Patch("/orders/{orderID}/status", staff.SetOrderStatus)
+
+		r.Get("/calls", staff.Calls)
+		r.Patch("/calls/{callID}/status", staff.SetCallStatus)
 	})
 }
 
