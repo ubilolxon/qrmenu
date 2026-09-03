@@ -13,6 +13,9 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/ubilolxon/qrmenu/internal/auth"
 	"github.com/ubilolxon/qrmenu/internal/billing"
 	"github.com/ubilolxon/qrmenu/internal/billing/payme"
@@ -20,6 +23,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/config"
 	apphttp "github.com/ubilolxon/qrmenu/internal/http"
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
+	"github.com/ubilolxon/qrmenu/internal/metrics"
 	"github.com/ubilolxon/qrmenu/internal/postgres"
 	"github.com/ubilolxon/qrmenu/internal/ratelimit"
 	"github.com/ubilolxon/qrmenu/internal/realtime"
@@ -95,6 +99,10 @@ func run() error {
 		logger.Info("object storage ready", slog.String("bucket", files.Bucket()))
 	}
 
+	if err := checkRowLevelSecurity(ctx, db, cfg, logger); err != nil {
+		return err
+	}
+
 	store := postgres.NewStore(db)
 	issuer := auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTTL, cfg.Auth.Issuer)
 
@@ -121,9 +129,25 @@ func run() error {
 	hub := realtime.New()
 	orders := service.NewOrder(store, hub, plans, logger)
 
-	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger, files), cfg.Public)
+	publicMenu := service.NewPublicMenu(store, rdb, logger, files)
+	publicPages, err := handler.NewPublic(publicMenu, cfg.Public)
 	if err != nil {
 		return fmt.Errorf("build public handler: %w", err)
+	}
+
+	// The three collectors are pull-based: they read numbers the pool, the hub
+	// and the menu cache are already keeping, when a scrape asks for them.
+	// Registration failing is a programming error — a duplicate metric name —
+	// so it is reported at boot rather than swallowed.
+	appMetrics := metrics.New()
+	for _, c := range []prometheus.Collector{
+		metrics.NewPoolCollector(db),
+		metrics.NewStreamCollector(hub),
+		metrics.NewCacheCollector(publicMenu),
+	} {
+		if err := appMetrics.Register(c); err != nil {
+			return fmt.Errorf("register metrics collector: %w", err)
+		}
 	}
 
 	router := apphttp.NewRouter(apphttp.Deps{
@@ -143,6 +167,7 @@ func run() error {
 		BillingSvc:  billingSvc,
 		Files:       files,
 		Limiter:     ratelimit.New(rdb, logger),
+		Metrics:     appMetrics,
 		PublicPages: publicPages,
 	})
 
@@ -154,7 +179,57 @@ func run() error {
 	// notice. This is that something.
 	go sweepSubscriptions(ctx, billingSvc, cfg.Billing, logger)
 
+	// On its own listener, so the scrape endpoint is not reachable from the
+	// port behind the load balancer. It shares ctx, so both stop together.
+	go func() {
+		if err := apphttp.ServeMetrics(ctx, cfg.HTTP.MetricsAddr, logger, appMetrics.Handler()); err != nil {
+			logger.Error("metrics server stopped", slog.Any("error", err))
+		}
+	}()
+
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)
+}
+
+// checkRowLevelSecurity verifies that the policies added in migration 00008
+// actually constrain this connection.
+//
+// This check exists because the failure it catches is silent and total. RLS is
+// bypassed entirely by a superuser or any role with BYPASSRLS — and the
+// standard Postgres image creates POSTGRES_USER as a superuser, so the obvious
+// way to run this service is the way that disables its last line of defence.
+// Nothing looks wrong: the tables report rowsecurity, pg_policies lists
+// eighteen policies, and every one of them is ignored.
+//
+// So it is a hard failure outside dev. A deployment that believes it has a
+// backstop and does not is worse off than one that knows it has none, because
+// the belief is what stops anyone checking.
+func checkRowLevelSecurity(ctx context.Context, db *pgxpool.Pool, cfg config.Config, logger *slog.Logger) error {
+	inForce, err := postgres.RLSInForce(ctx, db)
+	if err != nil {
+		return fmt.Errorf("check row-level security: %w", err)
+	}
+	if inForce {
+		logger.Info("row-level security is in force")
+		return nil
+	}
+
+	role, bypasses, err := postgres.DatabaseRole(ctx, db)
+	if err != nil {
+		return fmt.Errorf("check row-level security: %w", err)
+	}
+
+	detail := "the policies are present but this role is not subject to them"
+	if bypasses {
+		detail = fmt.Sprintf("role %q is a superuser or has BYPASSRLS, so every policy is ignored", role)
+	}
+
+	if cfg.IsDev() {
+		logger.Warn("row-level security is NOT in force; tenant isolation rests on the application alone",
+			slog.String("role", role), slog.String("detail", detail))
+		return nil
+	}
+	return fmt.Errorf("row-level security is not in force: %s. "+
+		"Connect as a role that owns no tables and has neither SUPERUSER nor BYPASSRLS", detail)
 }
 
 // paymentProviders builds the set this deployment has credentials for.

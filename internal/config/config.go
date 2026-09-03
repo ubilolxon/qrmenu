@@ -92,7 +92,10 @@ type Auth struct {
 }
 
 type HTTP struct {
-	Addr            string
+	Addr string
+	// MetricsAddr is a *separate* listener, so the scrape endpoint is not
+	// reachable from the port behind the load balancer. Empty disables it.
+	MetricsAddr     string
 	AllowedOrigins  []string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -137,6 +140,7 @@ func Load() (Config, error) {
 		LogLevel: parseLevel(l.str("LOG_LEVEL", "info")),
 		HTTP: HTTP{
 			Addr:            l.str("HTTP_ADDR", ":8080"),
+			MetricsAddr:     l.str("METRICS_ADDR", ":9091"),
 			AllowedOrigins:  l.csv("HTTP_ALLOWED_ORIGINS", "http://localhost:5173"),
 			ReadTimeout:     l.dur("HTTP_READ_TIMEOUT", 10*time.Second),
 			WriteTimeout:    l.dur("HTTP_WRITE_TIMEOUT", 30*time.Second),
@@ -212,6 +216,12 @@ func Load() (Config, error) {
 
 	// A wildcard CORS origin combined with credentialed refresh cookies would
 	// let any site drive the admin API on a logged-in user's behalf.
+	// Sharing a port would put pool saturation, request volumes and every route
+	// name on the public listener.
+	if cfg.HTTP.MetricsAddr != "" && cfg.HTTP.MetricsAddr == cfg.HTTP.Addr {
+		l.errf("METRICS_ADDR must not equal HTTP_ADDR (%s) — the scrape endpoint would be publicly reachable", cfg.HTTP.Addr)
+	}
+
 	if !cfg.IsDev() {
 		for _, o := range cfg.HTTP.AllowedOrigins {
 			if o == "*" {

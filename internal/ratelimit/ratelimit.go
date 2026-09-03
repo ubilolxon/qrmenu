@@ -8,6 +8,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -21,6 +22,19 @@ import (
 const (
 	OrdersPerMinute = 10
 	CallsPerMinute  = 5
+
+	// PublicMenuPerMinute caps menu reads per IP. High, because a real table of
+	// six people scanning and re-scanning is a dozen requests in a minute and
+	// the response is cached anyway; the number that matters is that it is not
+	// unbounded.
+	PublicMenuPerMinute = 60
+
+	// Login is limited per IP *and* per email address, and the pair is the
+	// point. Per IP alone does nothing against credential stuffing from a
+	// botnet; per email alone does nothing against one host walking a list of
+	// addresses. Only failures count against these — see Peek and Hit.
+	LoginPerIPPerMinute    = 15
+	LoginPerEmailPerMinute = 5
 )
 
 // Window is the bucket length. A fixed window, not a sliding one — the known
@@ -48,6 +62,62 @@ type Result struct {
 	RetryAfter time.Duration
 }
 
+// Peek reports whether key is already over its limit, without consuming
+// anything.
+//
+// It exists for login, where consuming on every attempt would mean a user who
+// signs in on their phone and their laptop and then their phone again has spent
+// part of a budget meant for an attacker. Only failures should count, which
+// takes a check before and a Hit after.
+func (l *Limiter) Peek(ctx context.Context, key string, limit int) Result {
+	if l == nil || l.redis == nil || limit <= 0 {
+		return Result{Allowed: true, Remaining: limit}
+	}
+
+	now := time.Now()
+	used, err := l.redis.Get(ctx, windowKey(key, now)).Int()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		l.logger.WarnContext(ctx, "rate limiter unavailable, allowing request",
+			slog.String("key", key), slog.Any("error", err))
+		return Result{Allowed: true, Remaining: limit}
+	}
+
+	if used >= limit {
+		return Result{Allowed: false, RetryAfter: remaining(now)}
+	}
+	return Result{Allowed: true, Remaining: limit - used}
+}
+
+// Hit records one unit against key. The result is ignored by callers that only
+// want to count — Peek is what asks the question.
+func (l *Limiter) Hit(ctx context.Context, key string) {
+	if l == nil || l.redis == nil {
+		return
+	}
+
+	pipe := l.redis.TxPipeline()
+	redisKey := windowKey(key, time.Now())
+	pipe.Incr(ctx, redisKey)
+	pipe.Expire(ctx, redisKey, Window+time.Second)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		l.logger.WarnContext(ctx, "rate limiter unavailable, attempt not counted",
+			slog.String("key", key), slog.Any("error", err))
+	}
+}
+
+// windowKey folds the window number into the key, so expiry does the cleanup
+// and there is no reset timestamp to store or race on.
+func windowKey(key string, now time.Time) string {
+	return fmt.Sprintf("rl:%s:%d", key, now.UnixNano()/int64(Window))
+}
+
+// remaining is how long until the current window ends, which is when a blocked
+// caller may retry.
+func remaining(now time.Time) time.Duration {
+	return Window - time.Duration(now.UnixNano()%int64(Window))
+}
+
 // Allow consumes one unit against key.
 //
 // It fails **open**: if Redis is unreachable the request is allowed. That is
@@ -61,11 +131,8 @@ func (l *Limiter) Allow(ctx context.Context, key string, limit int) Result {
 		return Result{Allowed: true, Remaining: limit}
 	}
 
-	// The window number is part of the key, so expiry does the cleanup and
-	// there is no reset timestamp to store or race on.
 	now := time.Now()
-	slot := now.UnixNano() / int64(Window)
-	redisKey := fmt.Sprintf("rl:%s:%d", key, slot)
+	redisKey := windowKey(key, now)
 
 	pipe := l.redis.TxPipeline()
 	count := pipe.Incr(ctx, redisKey)
@@ -83,9 +150,7 @@ func (l *Limiter) Allow(ctx context.Context, key string, limit int) Result {
 
 	used := int(count.Val())
 	if used > limit {
-		// How long until this window ends, which is when the caller may retry.
-		elapsed := time.Duration(now.UnixNano() % int64(Window))
-		return Result{Allowed: false, RetryAfter: Window - elapsed}
+		return Result{Allowed: false, RetryAfter: remaining(now)}
 	}
 	return Result{Allowed: true, Remaining: limit - used}
 }

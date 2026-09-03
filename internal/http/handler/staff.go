@@ -106,9 +106,20 @@ func (h Staff) Stream(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(Heartbeat)
 	defer ticker.Stop()
 
+	// Captured once: after shutdown begins this channel is closed, and a closed
+	// channel is always ready, so the select below leaves immediately.
+	draining := middleware.Draining(r.Context())
+
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+
+		case <-draining:
+			// The server is going away. Hanging up now — rather than waiting to
+			// be cut off when the shutdown timeout expires — is what lets the
+			// tablet reconnect to the next instance while the kitchen is still
+			// looking at a board that says something.
 			return
 
 		case event, open := <-sub.Events():

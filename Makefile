@@ -82,3 +82,13 @@ tidy: ## Tidy and verify modules
 
 .PHONY: check
 check: lint test ## Everything CI runs
+
+.PHONY: db-role
+db-role: ## Create the unprivileged application role (run after migrate)
+	@test -n "$(password)" || (echo "usage: make db-role password=secret" && exit 1)
+	psql "$(DATABASE_URL)" -v app_password="'$(password)'" -f deploy/postgres/app-role.sql
+
+.PHONY: load
+load: ## Load-test the public menu: make load url=http://localhost:8080/api/v1/public/t/TOKEN
+	@test -n "$(url)" || (echo "usage: make load url=http://…/api/v1/public/t/TOKEN" && exit 1)
+	go run ./cmd/loadtest -url "$(url)" -c 100 -clients 20000 -rps 2000 -d 30s

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,7 +26,18 @@ type PublicMenu struct {
 	ttl    time.Duration
 	logger *slog.Logger
 	media  MediaURLs
+
+	// Counted here rather than reported to a metrics package, so this file
+	// stays free of a Prometheus import; internal/metrics reads them when a
+	// scrape arrives. The hit ratio is the best health signal the service has —
+	// a hit is one Redis round trip, a miss is a dozen queries and a render.
+	hits   atomic.Uint64
+	misses atomic.Uint64
 }
+
+// CacheHits and CacheMisses satisfy metrics.CacheSource.
+func (s *PublicMenu) CacheHits() uint64   { return s.hits.Load() }
+func (s *PublicMenu) CacheMisses() uint64 { return s.misses.Load() }
 
 // MediaURLs turns a storage key into the address a browser fetches it from.
 //
@@ -97,8 +109,13 @@ func (s *PublicMenu) build(ctx context.Context, restaurant gen.Restaurant, reque
 	key := CacheKey(restaurant.ID, locale, restaurant.MenuVersion)
 
 	if cached, ok := s.fromCache(ctx, key); ok {
+		s.hits.Add(1)
 		return cached, nil
 	}
+	// Counted once here rather than at each of the three ways fromCache can
+	// come back empty, so "miss" means the same thing on every path: the menu
+	// had to be rebuilt.
+	s.misses.Add(1)
 
 	menu, err := s.assemble(ctx, restaurant, locale)
 	if err != nil {

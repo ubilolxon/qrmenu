@@ -17,6 +17,7 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/http/handler"
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/metrics"
 	"github.com/ubilolxon/qrmenu/internal/ratelimit"
 	"github.com/ubilolxon/qrmenu/internal/service"
 	"github.com/ubilolxon/qrmenu/internal/storage"
@@ -40,6 +41,7 @@ type Deps struct {
 	BillingSvc  *service.Billing
 	Files       *storage.Client
 	Limiter     *ratelimit.Limiter
+	Metrics     *metrics.Metrics
 	PublicPages handler.Public
 }
 
@@ -58,6 +60,13 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Recover)
 	r.Use(middleware.CORS(d.Config.HTTP.AllowedOrigins))
 
+	// Inside Recover, so a panicking handler is still timed and still counted
+	// as the 500 it becomes. Outside nothing else, because the route pattern it
+	// labels with is only filled in once chi has finished routing.
+	if d.Metrics != nil {
+		r.Use(d.Metrics.Middleware)
+	}
+
 	// HEAD is mandatory wherever GET is offered (RFC 9110 §9.1), and chi only
 	// registers the methods you name. Without this, every CDN, uptime monitor
 	// and link previewer that probes with HEAD gets a 405. Falling through to
@@ -75,19 +84,32 @@ func NewRouter(d Deps) http.Handler {
 	//
 	// /m/{slug} is the restaurant's own menu link; /t/{token} is a specific
 	// table, and carries the table context an order will need in Phase 5.
-	r.Get("/m/{slug}", d.PublicPages.PageBySlug)
-	r.Get("/m/{slug}/qr.png", d.PublicPages.QRBySlug("png"))
-	r.Get("/m/{slug}/qr.svg", d.PublicPages.QRBySlug("svg"))
-	r.Get("/m/{slug}/qr.card.svg", d.PublicPages.QRBySlug("card.svg"))
+	//
+	// Read-limited per IP. The whole group is wrapped rather than each handler,
+	// because a menu is served by six of them — HTML, JSON and three QR formats
+	// — and a limit remembered at each is a limit that will be forgotten at one.
+	r.Group(func(r chi.Router) {
+		r.Use(byIP(d.Limiter, ratelimit.PublicMenuPerMinute, "menu"))
 
-	r.Get("/t/{token}", d.PublicPages.PageByToken)
-	r.Get("/t/{token}/qr.png", d.PublicPages.QRByToken("png"))
-	r.Get("/t/{token}/qr.svg", d.PublicPages.QRByToken("svg"))
-	r.Get("/t/{token}/qr.card.svg", d.PublicPages.QRByToken("card.svg"))
+		r.Get("/m/{slug}", d.PublicPages.PageBySlug)
+		r.Get("/m/{slug}/qr.png", d.PublicPages.QRBySlug("png"))
+		r.Get("/m/{slug}/qr.svg", d.PublicPages.QRBySlug("svg"))
+		r.Get("/m/{slug}/qr.card.svg", d.PublicPages.QRBySlug("card.svg"))
+
+		r.Get("/t/{token}", d.PublicPages.PageByToken)
+		r.Get("/t/{token}/qr.png", d.PublicPages.QRByToken("png"))
+		r.Get("/t/{token}/qr.svg", d.PublicPages.QRByToken("svg"))
+		r.Get("/t/{token}/qr.card.svg", d.PublicPages.QRByToken("card.svg"))
+	})
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Guests scanning a QR code. No auth, heavily cached, ETag-validated.
 		r.Route("/public", func(r chi.Router) {
+			// The write endpoints below carry their own, tighter limits, keyed
+			// on the table rather than the IP — everyone in the restaurant is
+			// behind one NAT address.
+			r.Use(byIP(d.Limiter, ratelimit.PublicMenuPerMinute, "menu"))
+
 			orders := handler.NewOrder(d.Orders, d.Config.Public, d.Config.Auth.CookieSecure, d.Limiter)
 
 			r.Get("/m/{slug}", d.PublicPages.MenuBySlug)
@@ -155,7 +177,7 @@ func NewRouter(d Deps) http.Handler {
 // group, so a route added to the wrong block fails closed — an unauthenticated
 // request reaches no handler at all rather than one that forgot to check.
 func (d Deps) mountAdmin(r chi.Router) {
-	authHandler := handler.NewAuth(d.AuthSvc, d.Config.Auth)
+	authHandler := handler.NewAuth(d.AuthSvc, d.Config.Auth, d.Limiter)
 	restaurants := handler.NewRestaurant(d.Restaurants)
 
 	// Unauthenticated: these are how a caller obtains credentials in the first
@@ -376,6 +398,11 @@ func mountImages(r chi.Router, h handler.Image) {
 			r.With(editors).Post("/complete", h.Complete)
 		})
 	})
+}
+
+// byIP is the shape every unauthenticated read limit takes here.
+func byIP(limiter *ratelimit.Limiter, limit int, prefix string) func(http.Handler) http.Handler {
+	return middleware.RateLimit(limiter, limit, prefix, middleware.ClientIP)
 }
 
 func notImplemented(w http.ResponseWriter, _ *http.Request) {

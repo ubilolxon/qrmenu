@@ -26,6 +26,7 @@ curl localhost:8080/readyz    # readiness — reports postgres and redis
 ```
 cmd/api          HTTP server
 cmd/migrate      goose migration runner
+cmd/loadtest     drives the public menu and reports tail latency + cache hit ratio
 internal/config  environment → validated Config, resolved once at boot
 internal/domain  pure business types and rules — imports no infrastructure
 internal/postgres  pool, embedded migrations, sqlc output, repositories
@@ -39,6 +40,7 @@ internal/i18n    locale negotiation and fallback for translated fields
 internal/realtime  the SSE hub — one goroutine-safe registry per restaurant
 internal/ratelimit Redis token bucket for the unauthenticated write endpoints
 internal/billing   payment-provider abstraction; `payme/` is the Merchant API
+internal/metrics   Prometheus instrumentation; the costly numbers are pulled, not pushed
 web/             SPA (separate build)
 deploy/          Dockerfile, docker-compose
 ```
@@ -412,6 +414,164 @@ Authentication is HTTP Basic with the fixed username `Paycom`, compared in
 constant time on both halves. `click` and `stripe` are named in the schema and
 the provider enum but are not implemented.
 
+## Tenant isolation
+
+Four layers, in order of how much they actually help.
+
+1. **Repository signatures make it unforgettable.** Every method takes the scope
+   as its first argument. There is no `GetItem(ctx, id)` — only
+   `GetItem(ctx, restaurantID, id)`.
+2. **The scope comes from the verified token, never from the request body.**
+3. **Every query is hand-written (sqlc)**, so the predicate is visible in a
+   `.sql` file and shows up in a diff.
+4. **Row-level security**, as a backstop underneath the other three.
+
+### The backstop, stated precisely
+
+Migration `00008` enables RLS on every tenant-owned table and adds one policy
+per table. A connection is scoped by `app.tenant_id`, which
+`internal/postgres` sets on **every** acquire from the pool — including the
+unscoped ones, so a connection returned to the pool can never be handed out
+still carrying the last request's tenant.
+
+What it buys: a query that forgets its `WHERE` returns **zero rows** instead of
+another tenant's data. There is a test that does exactly that.
+
+What it does **not** buy, and this matters:
+
+- **It only binds when a tenant is set.** It is set on every authenticated
+  request. It is deliberately *not* set for migrations, for the login lookup
+  that works out which tenant an address belongs to, or for the public menu
+  surface — where the credential is an unguessable QR token rather than an
+  account. Those paths are exactly as protected as they were before.
+- **It is inert for a superuser.** A superuser, or any role with `BYPASSRLS`,
+  ignores every policy — and the standard Postgres image creates `POSTGRES_USER`
+  as a superuser. So the obvious way to run this service is the way that
+  silently disables its last line of defence, with `pg_policies` still listing
+  every policy and `rowsecurity` still true on every table.
+
+Because that failure is silent and total, the API **checks empirically at boot**
+— it scopes a connection to a tenant that owns nothing and counts rows — and
+warns in dev, refuses to start elsewhere:
+
+```
+level=WARN msg="row-level security is NOT in force; tenant isolation rests on the application alone"
+  role=postgres detail="role \"postgres\" is a superuser or has BYPASSRLS, so every policy is ignored"
+```
+
+The fix is one command, run once after migrating:
+
+```bash
+make migrate
+make db-role password=…       # creates qrmenu_app: no ownership, no BYPASSRLS
+```
+
+then point the API at that role. Migrations keep running as the owner; the
+application never needs `CREATE`.
+
+## Observability
+
+`/metrics` is served on **its own listener** (`METRICS_ADDR`, default `:9091`),
+not as a route on the main router. Pool saturation, request volumes and every
+route name in the service would otherwise be published on the port behind the
+load balancer. Config refuses to start if the two addresses match. Nothing
+authenticates the scrape endpoint — the boundary being relied on is the network.
+
+| Metric | What it tells you |
+|---|---|
+| `qrmenu_http_request_duration_seconds` | latency by **route pattern**, method, status |
+| `qrmenu_menu_cache_hits_total` / `_misses_total` | the single best health signal — see below |
+| `qrmenu_db_pool_acquire_wait_seconds_total` | pool saturation |
+| `qrmenu_sse_connections`, `_dropped_events_total` | staff streams, and whether they are keeping up |
+| `qrmenu_rate_limited_total` | refusals, by route |
+
+Two deliberate choices behind that table:
+
+**Labels are route patterns, never paths.** `/api/v1/public/orders/{orderID}`,
+not the id. A histogram labelled with raw paths grows one time series per order,
+and a scanner walking `/wp-admin`, `/.env` and ten thousand other guesses would
+mint one per guess — a denial of service against the monitoring rather than the
+service. Unmatched requests collapse to `route="other"`. Pinned by a test.
+
+**The expensive numbers are pulled, not pushed.** Pool stats, open SSE
+connections and cache hits are already counted by the packages that own them, so
+a collector reads them when a scrape arrives instead of putting a Prometheus
+import into three packages that are better off without one.
+
+The menu cache hit ratio is the number to watch. A hit is one Redis round trip;
+a miss is a dozen queries and a render. A ratio that falls without traffic
+changing means something is bumping `menu_version` that should not be.
+
+**A caveat on pool saturation:** `acquire_wait_seconds_total` covers everything
+`Acquire` does, and that now includes the one round trip that sets the RLS
+scope. Its floor under zero contention is one round trip per acquire, not zero.
+Alert on the rate of change against a baseline, not on an absolute value.
+
+## Rate limits
+
+Fixed-window, in Redis, and **failing open** everywhere: an unreachable cache
+must not stop a restaurant serving its menu or taking orders.
+
+| Limit | Key | Per minute |
+|---|---|---|
+| Public menu reads | client IP | 60 |
+| Order creation | **table token** | 10 |
+| Waiter calls | **table token** | 5 |
+| Login | client IP | 15 |
+| Login | email address (hashed) | 5 |
+
+The guest write limits key on the table rather than the IP because everyone in
+the restaurant is behind one NAT address, and limiting by IP would let the first
+table's order rush silence the rest of the room.
+
+Login is limited on **both** keys, and the pair is the point: per IP alone does
+nothing against credential stuffing from a botnet, and per email alone does
+nothing against one host walking a list of addresses. Only *failures* count —
+charging a successful sign-in would mean a user logging in on their phone, their
+laptop and then their phone again has spent part of an allowance meant for an
+attacker. The address is hashed before it becomes a Redis key, so a cache dump
+is not a list of who has an account here.
+
+## Shutdown
+
+"Graceful" means two opposite things here, so there are two signals.
+
+An ordinary request must be allowed to **finish** — a POST halfway through
+writing an order that gets cut off leaves its client not knowing whether the
+order exists. A staff stream held open for the length of a shift must be closed
+**immediately**, because waiting for it to finish means waiting out the shutdown
+timeout and then killing it anyway.
+
+The obvious implementation — deriving every request context from the process
+context — gets the second case right and the first one wrong. So request
+contexts are independent of shutdown, and `middleware.Draining` is how the
+handlers that care find out. Measured: a stream lets go in ~13 ms while an
+in-flight order still returns 201.
+
+## Load testing
+
+```bash
+make load url=http://localhost:8080/api/v1/public/t/TOKEN
+```
+
+`cmd/loadtest` drives the public menu — the only endpoint that has to survive a
+crowd — and reports tail latency plus the cache hit ratio across the run.
+
+Two flags exist because of what the first version measured. `-clients N` presents
+as N distinct IPs via `X-Forwarded-For`; without it the per-IP limit refuses
+everything after sixty requests and the tool spends the run measuring how fast a
+429 can be written. `-rps` paces the load so each simulated client stays under
+its own budget. Refusals are excluded from the latency distribution — a 429 is
+written without touching Postgres or Redis, so counting it would report a
+service that looks faster the more of it is broken.
+
+Measured on one laptop, everything colocated, against the demo restaurant:
+
+| Load | Result |
+|---|---|
+| 2 000 rps paced, 20 000 clients | p50 7.3 ms, p99 14.0 ms, 0 failures, 100% cache hit ratio |
+| unpaced, 200 workers | **22 459 rps**, p50 8.3 ms, p99 20.6 ms, 0.04% failures |
+
 ## Image uploads
 
 Uploading is two steps, and the split is the point.
@@ -559,6 +719,21 @@ holds the two rules the billing design is built around:
 `TestSuspensionFreezesWritesButNotReads`, and `TestGuestNeverSeesTheUpsell` —
 which asserts the diner's refusal mentions no plan, no price and no upgrade.
 
+`internal/service/rls_test.go` is the one that keeps the backstop honest. It
+creates an unprivileged role, connects as it, and runs a query with **no tenant
+predicate at all** — the shape of a forgotten `WHERE` — asserting it comes back
+empty. Running it as the owner would pass vacuously, which is the exact failure
+being guarded against, so the role is created by the test rather than assumed.
+It also pins that the scope cannot survive a connection going back to the pool,
+and that the boot check reports `false` for a role that bypasses RLS.
+
+`internal/metrics/metrics_test.go` pins label cardinality: three different order
+ids must produce one time series, and three scanner paths must collapse to
+`route="other"`. It also checks that `http.ResponseController` still works
+through the metrics wrapper — a wrapper without `Unwrap` is how the logging
+middleware once broke every SSE connection, and adding metrics must not
+reintroduce it.
+
 `internal/domain/order_test.go` pins the pricing rules and the status machine
 without a database, because they are pure functions of (menu, cart) by design —
 that is what `domain.Catalog` exists for. `internal/realtime/hub_test.go` covers
@@ -584,4 +759,8 @@ blocking the publisher, and events crossing between restaurants. Run it with
 - **Phase 6** — plans, limits enforced on the write path, subscriptions and
   invoices, the `manual` provider, the Payme Merchant API, and the daily expiry
   sweep.
-- **Phase 7 next** — admin SPA, RLS backstop, metrics, load test, deploy.
+- **Phase 7** — row-level security backstop with a boot check that refuses to
+  pretend, Prometheus metrics on a separate listener, login and public-read rate
+  limits, tenant/user on every log line, shutdown that drains writes and drops
+  streams, and a load test.
+- **Next** — the admin SPA, and deployment.

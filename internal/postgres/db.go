@@ -40,6 +40,12 @@ func Connect(ctx context.Context, cfg config.DB) (*pgxpool.Pool, error) {
 	}
 	poolCfg.HealthCheckPeriod = time.Minute
 
+	// Scope every connection to the tenant of the request acquiring it, so the
+	// row-level security policies in migration 00008 have something to act on.
+	// See internal/postgres/rls.go for why this runs on every acquire and not
+	// only the scoped ones.
+	poolCfg.BeforeAcquire = setTenantGUC
+
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)

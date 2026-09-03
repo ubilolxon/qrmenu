@@ -1,23 +1,30 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/ubilolxon/qrmenu/internal/config"
 	"github.com/ubilolxon/qrmenu/internal/domain"
 	"github.com/ubilolxon/qrmenu/internal/http/middleware"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/ratelimit"
 	"github.com/ubilolxon/qrmenu/internal/service"
 )
 
 type Auth struct {
-	svc *service.Auth
-	cfg config.Auth
+	svc     *service.Auth
+	cfg     config.Auth
+	limiter *ratelimit.Limiter
 }
 
-func NewAuth(svc *service.Auth, cfg config.Auth) Auth {
-	return Auth{svc: svc, cfg: cfg}
+// limiter may be nil, which means no limiting — the same shape the guest
+// ordering handler uses.
+func NewAuth(svc *service.Auth, cfg config.Auth, limiter *ratelimit.Limiter) Auth {
+	return Auth{svc: svc, cfg: cfg, limiter: limiter}
 }
 
 type registerRequest struct {
@@ -93,13 +100,51 @@ func (h Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two keys, and the pair is the point: per IP alone does nothing against
+	// credential stuffing from a botnet, and per email alone does nothing
+	// against one host walking a list of addresses.
+	//
+	// The email is normalised first so "A@B.com" and "a@b.com" share a budget,
+	// and hashed so a Redis dump is not a list of who has an account here.
+	keys := []struct {
+		key   string
+		limit int
+	}{
+		{"login:ip:" + middleware.ClientIP(r), ratelimit.LoginPerIPPerMinute},
+		{"login:email:" + hashKey(domain.NormalizeEmail(req.Email)), ratelimit.LoginPerEmailPerMinute},
+	}
+
+	for _, k := range keys {
+		if result := h.limiter.Peek(r.Context(), k.key, k.limit); !result.Allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds()+0.999)))
+			httperr.Write(w, http.StatusTooManyRequests, httperr.CodeRateLimited,
+				"Too many sign-in attempts. Please wait a moment and try again.", nil)
+			return
+		}
+	}
+
 	session, err := h.svc.Login(r.Context(), req.Email, req.Password, sessionMeta(r))
 	if err != nil {
+		// Only failures are counted. Charging a successful sign-in against the
+		// budget would mean a user logging in on their phone, their laptop and
+		// then their phone again has spent part of an allowance meant for an
+		// attacker.
+		for _, k := range keys {
+			h.limiter.Hit(r.Context(), k.key)
+		}
 		RenderError(w, r, err)
 		return
 	}
 
 	h.writeSession(w, session, http.StatusOK)
+}
+
+// hashKey keeps an email address out of Redis. The limiter only ever needs to
+// know that two attempts targeted the same account, not which account, and a
+// cache dump should not double as a list of registered addresses.
+func hashKey(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
 }
 
 // Refresh exchanges the refresh cookie for a new access token and a rotated

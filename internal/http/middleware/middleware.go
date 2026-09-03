@@ -7,18 +7,88 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/ratelimit"
 )
 
 type ctxKey int
 
-const requestIDKey ctxKey = iota
+// One block for every context key in this package. Splitting them across files
+// is how two of them end up with the same value: ctxKey is an int, and a second
+// file writing `= 1` collides silently with whatever iota already produced.
+const (
+	requestIDKey ctxKey = iota
+	scopeKey
+	identityKey
+	drainKey
+)
+
+// WithDraining marks ctx with a channel that is closed when the server begins
+// shutting down. The HTTP server sets it on every request's base context.
+func WithDraining(ctx context.Context, draining <-chan struct{}) context.Context {
+	return context.WithValue(ctx, drainKey, draining)
+}
+
+// Draining returns a channel closed when shutdown begins, or nil when the
+// request was not served by a shutting-down-aware server. A nil channel blocks
+// forever in a select, which is the right default: a handler that cannot learn
+// about shutdown should simply keep working.
+//
+// This exists because "graceful shutdown" means two opposite things depending
+// on the handler. An ordinary request should be allowed to *finish* — a POST
+// halfway through writing an order must not be cut off, or its client is left
+// not knowing whether the order exists. A stream held open for the length of a
+// shift should be closed *immediately*, because waiting for it to finish means
+// waiting out the shutdown timeout and then killing it anyway.
+//
+// The obvious implementation — deriving every request context from the process
+// context — gets the second case right and the first one wrong. So the two
+// signals are kept apart: request contexts are independent of shutdown, and
+// this channel is how the handlers that care find out.
+func Draining(ctx context.Context) <-chan struct{} {
+	ch, _ := ctx.Value(drainKey).(<-chan struct{})
+	return ch
+}
+
+// scope is a mutable per-request holder, and it exists because of an ordering
+// problem: Logger has to run outermost to time and record everything, including
+// requests that never reach a handler — but the caller's identity is not known
+// until Authenticate runs, several layers in, and Authenticate publishes it by
+// deriving a *new* context that the outer Logger will never see.
+//
+// So Logger installs a pointer here on the way in and reads it on the way out.
+// One request is handled by one goroutine between those two points, so a plain
+// struct is enough; nothing else may retain it.
+type scope struct {
+	tenantID string
+	userID   string
+	role     string
+}
+
+func scopeFrom(ctx context.Context) *scope {
+	s, _ := ctx.Value(scopeKey).(*scope)
+	return s
+}
+
+// recordActor is called by Authenticate once the token has been verified, so
+// every log line for the rest of the request carries who made it. A request
+// that fails authentication records nothing, which is correct — there is no
+// verified actor to name.
+func recordActor(ctx context.Context, id Identity) {
+	if s := scopeFrom(ctx); s != nil {
+		s.tenantID = id.TenantID.String()
+		s.userID = id.UserID.String()
+		s.role = string(id.Role)
+	}
+}
 
 const RequestIDHeader = "X-Request-ID"
 
@@ -88,6 +158,9 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
 
+			actor := &scope{}
+			r = r.WithContext(context.WithValue(r.Context(), scopeKey, actor))
+
 			next.ServeHTTP(rec, r)
 
 			if rec.status == 0 {
@@ -104,7 +177,7 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 				level = slog.LevelWarn
 			}
 
-			logger.LogAttrs(r.Context(), level, "http request",
+			attrs := []slog.Attr{
 				slog.String("request_id", RequestIDFrom(r.Context())),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
@@ -112,7 +185,20 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.Int("bytes", rec.bytes),
 				slog.Duration("took", time.Since(start).Round(time.Microsecond)),
 				slog.String("ip", ClientIP(r)),
-			)
+			}
+			// Only present on an authenticated request, and deliberately
+			// omitted rather than empty on the others: a blank tenant_id in a
+			// log aggregator is a value that groups, and thousands of anonymous
+			// menu reads would form a convincing-looking tenant.
+			if actor.tenantID != "" {
+				attrs = append(attrs,
+					slog.String("tenant_id", actor.tenantID),
+					slog.String("user_id", actor.userID),
+					slog.String("role", actor.role),
+				)
+			}
+
+			logger.LogAttrs(r.Context(), level, "http request", attrs...)
 		})
 	}
 }
@@ -134,8 +220,14 @@ func ClientIP(r *http.Request) string {
 	if real := r.Header.Get("X-Real-IP"); real != "" {
 		return real
 	}
-	host, _, found := strings.Cut(r.RemoteAddr, ":")
-	if !found {
+	// net.SplitHostPort, not a Cut on ":". An IPv6 RemoteAddr is "[::1]:54321",
+	// so cutting at the first colon yields "[" — and since this value is a rate
+	// limiter key, every IPv6 client would share one bucket and any one of them
+	// could lock out the rest.
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// No port at all, which is what a Unix socket or a hand-built test
+		// request looks like. The address is already the host.
 		return r.RemoteAddr
 	}
 	return host
@@ -193,6 +285,34 @@ func CORS(allowed []string) func(http.Handler) http.Handler {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RateLimit caps how often one caller may hit a route group.
+//
+// It is middleware rather than a per-handler check because the public menu is
+// served by several handlers — HTML, JSON, three QR formats — and a limit that
+// has to be remembered at each of them is a limit that will be forgotten at one.
+//
+// key names what is being limited, and it is a function rather than a value so
+// the caller decides whether that is an IP, a table token, or something else.
+// Like the limiter itself, this fails open: an unreachable Redis must not stop a
+// restaurant serving its menu.
+func RateLimit(limiter *ratelimit.Limiter, limit int, prefix string, key func(*http.Request) string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			result := limiter.Allow(r.Context(), prefix+":"+key(r), limit)
+			if !result.Allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds()+0.999)))
+				httperr.Write(w, http.StatusTooManyRequests, httperr.CodeRateLimited,
+					"Too many requests. Please wait a moment.", nil)
+				return
 			}
 			next.ServeHTTP(w, r)
 		})

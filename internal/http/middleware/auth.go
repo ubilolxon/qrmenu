@@ -12,9 +12,8 @@ import (
 	"github.com/ubilolxon/qrmenu/internal/auth"
 	"github.com/ubilolxon/qrmenu/internal/domain"
 	"github.com/ubilolxon/qrmenu/internal/httperr"
+	"github.com/ubilolxon/qrmenu/internal/postgres"
 )
-
-const identityKey ctxKey = 1
 
 // Identity is who the request is acting as. It comes only from a verified
 // access token — never from a header, query parameter, or request body — which
@@ -77,7 +76,16 @@ func Authenticate(issuer *auth.Issuer) func(http.Handler) http.Handler {
 			}
 
 			identity := Identity{UserID: userID, TenantID: claims.TenantID, Role: claims.Role}
+			recordActor(r.Context(), identity)
+
 			ctx := context.WithValue(r.Context(), identityKey, identity)
+			// The same tenant, carried a second way: the value above is what
+			// handlers read, and this is what the connection pool reads to
+			// scope the database session. Both come from the verified token and
+			// neither is derived from the other, so a handler that ignores its
+			// tenant argument is still constrained by row-level security.
+			ctx = postgres.WithTenant(ctx, identity.TenantID)
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
