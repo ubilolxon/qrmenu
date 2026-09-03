@@ -36,7 +36,7 @@ func (h *harness) imageService(t *testing.T) *service.Image {
 	if err != nil {
 		t.Fatalf("build storage client: %v", err)
 	}
-	return service.NewImage(postgres.NewStore(h.pool), files, slog.New(slog.DiscardHandler))
+	return service.NewImage(postgres.NewStore(h.pool), files, nil, slog.New(slog.DiscardHandler))
 }
 
 func TestImageTenantIsolation(t *testing.T) {

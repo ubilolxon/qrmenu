@@ -15,10 +15,12 @@ import (
 
 type Table struct {
 	store *postgres.Store
+	plans *Plan
 }
 
-func NewTable(store *postgres.Store) *Table {
-	return &Table{store: store}
+// plans may be nil, which permits everything. See service.Plan.
+func NewTable(store *postgres.Store, plans *Plan) *Table {
+	return &Table{store: store, plans: plans}
 }
 
 func (s *Table) assertRestaurant(ctx context.Context, tenantID, restaurantID uuid.UUID) error {
@@ -41,6 +43,9 @@ func (s *Table) Create(ctx context.Context, tenantID, restaurantID uuid.UUID, in
 	}
 	in.Label = strings.TrimSpace(in.Label)
 	if err := in.Validate(); err != nil {
+		return domain.Table{}, err
+	}
+	if err := s.plans.Check(ctx, tenantID, domain.ResourceTables); err != nil {
 		return domain.Table{}, err
 	}
 

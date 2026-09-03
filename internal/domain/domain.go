@@ -17,6 +17,12 @@ var (
 	ErrConflict     = errors.New("already exists")
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrForbidden    = errors.New("forbidden")
+
+	// ErrPlanLimit is a refusal the customer can act on by paying, not by
+	// fixing their request, which is why it is separate from ErrForbidden: the
+	// HTTP layer renders it as 402 and the SPA shows an upgrade prompt rather
+	// than "you are not allowed to do that".
+	ErrPlanLimit = errors.New("plan limit reached")
 )
 
 // StatusError pairs a sentinel with a message that is safe to show a user.

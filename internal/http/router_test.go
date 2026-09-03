@@ -114,7 +114,9 @@ func TestErrorEnvelopeShape(t *testing.T) {
 		// genuine 404 rather than a not-yet-implemented surface.
 		{"unknown admin route", http.MethodGet, "/api/v1/admin/x", http.StatusNotFound, "NOT_FOUND"},
 		{"unknown staff route", http.MethodGet, "/api/v1/staff/x", http.StatusNotFound, "NOT_FOUND"},
-		{"unbuilt webhook", http.MethodGet, "/webhooks/stripe", http.StatusNotImplemented, "NOT_IMPLEMENTED"},
+		// A provider this deployment has no credentials for is not mounted at
+		// all, so it 404s rather than accepting callbacks it could not verify.
+		{"unconfigured webhook provider", http.MethodGet, "/webhooks/stripe", http.StatusNotFound, "NOT_FOUND"},
 	}
 
 	for _, tc := range tests {
@@ -249,6 +251,42 @@ func TestStaffRoutesRequireAuthentication(t *testing.T) {
 				t.Errorf("status = %d, want 401", resp.StatusCode)
 			}
 		})
+	}
+}
+
+// Billing is where a role mistake costs money: a waiter who could reach
+// /billing/invoices/{id}/pay could mark the account's bills settled. Every
+// route here must reject an anonymous caller *and* every role but owner.
+//
+// The nil service in testRouter is what makes this strong — a request that gets
+// past the middleware panics rather than quietly succeeding.
+func TestBillingRoutesAreOwnerOnly(t *testing.T) {
+	invoiceID := uuid.NewString()
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/billing/"},
+		{http.MethodPost, "/api/v1/admin/billing/subscribe"},
+		{http.MethodPost, "/api/v1/admin/billing/cancel"},
+		{http.MethodGet, "/api/v1/admin/billing/invoices/"},
+		{http.MethodPost, "/api/v1/admin/billing/invoices/" + invoiceID + "/pay"},
+		{http.MethodPost, "/api/v1/admin/billing/invoices/" + invoiceID + "/void"},
+	}
+
+	for _, rt := range routes {
+		t.Run("anonymous "+rt.method+" "+rt.path, func(t *testing.T) {
+			resp := do(t, testRouter(t), rt.method, rt.path, nil)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+
+		for _, role := range []domain.Role{domain.RoleManager, domain.RoleWaiter, domain.RoleKitchen} {
+			t.Run(string(role)+" "+rt.method+" "+rt.path, func(t *testing.T) {
+				resp := do(t, testRouter(t), rt.method, rt.path, bearer(tokenFor(t, role)))
+				if resp.StatusCode != http.StatusForbidden {
+					t.Errorf("status = %d, want 403 for role %s", resp.StatusCode, role)
+				}
+			})
+		}
 	}
 }
 

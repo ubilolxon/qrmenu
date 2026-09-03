@@ -118,6 +118,17 @@ func constraintLabel(constraint string) string {
 		return "idempotency key already used"
 	case "waiter_calls_open_uniq":
 		return "a call is already open for this table"
+	case "invoices_number_uniq", "invoices_year_seq_uniq":
+		// Not user-facing: the yearly sequence is allocated as max+1 and two
+		// invoices raised at once can pick the same one, so the service
+		// retries. "invoice number" is the phrase that retry check matches.
+		return "invoice number already taken"
+	case "subscriptions_tenant_live_uniq":
+		return "this account already has a subscription"
+	case "payment_transactions_provider_txn_uniq":
+		return "payment transaction already recorded"
+	case "payment_transactions_invoice_live_uniq":
+		return "a payment is already in progress for this invoice"
 	default:
 		return "record already exists"
 	}

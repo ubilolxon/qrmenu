@@ -23,7 +23,38 @@ type Config struct {
 	Storage  Storage
 	Auth     Auth
 	Public   Public
+	Billing  Billing
 }
+
+type Billing struct {
+	// GracePeriod is how long an unpaid subscription keeps working after its
+	// period ends, before it is suspended. Long enough for a bank transfer to
+	// clear over a weekend.
+	GracePeriod time.Duration
+	// SweepInterval is how often the expiry pass runs. Daily is what the
+	// architecture calls for; it is configurable so a test environment can
+	// watch a suspension happen without waiting a day.
+	SweepInterval time.Duration
+	// ManualInstructions is shown at checkout when payment is by transfer —
+	// bank details, typically. Per-business, so it is configuration and not a
+	// constant.
+	ManualInstructions string
+
+	Payme Payme
+}
+
+// Payme is the Uzbek Merchant API. Both fields are required for the provider to
+// be offered at all: a merchant id with no key would take customers to a
+// checkout whose callbacks we could not verify, which is worse than not
+// offering the method.
+type Payme struct {
+	MerchantID  string
+	Key         string
+	CheckoutURL string
+}
+
+// Configured reports whether this deployment can actually take Payme payments.
+func (p Payme) Configured() bool { return p.MerchantID != "" && p.Key != "" }
 
 type Public struct {
 	// BaseURL is what QR codes encode and what printed cards show, so it must
@@ -142,6 +173,16 @@ func Load() (Config, error) {
 			CookieDomain: l.str("AUTH_COOKIE_DOMAIN", ""),
 			CookiePath:   l.str("AUTH_COOKIE_PATH", "/api/v1/admin/auth"),
 		},
+		Billing: Billing{
+			GracePeriod:        l.dur("BILLING_GRACE_PERIOD", 72*time.Hour),
+			SweepInterval:      l.dur("BILLING_SWEEP_INTERVAL", 24*time.Hour),
+			ManualInstructions: l.str("BILLING_MANUAL_INSTRUCTIONS", ""),
+			Payme: Payme{
+				MerchantID:  l.str("PAYME_MERCHANT_ID", ""),
+				Key:         l.str("PAYME_KEY", ""),
+				CheckoutURL: l.str("PAYME_CHECKOUT_URL", ""),
+			},
+		},
 		Public: Public{
 			BaseURL:              strings.TrimRight(l.str("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 			CacheMaxAge:          l.dur("PUBLIC_CACHE_MAX_AGE", 60*time.Second),
@@ -177,6 +218,17 @@ func Load() (Config, error) {
 				l.errf("HTTP_ALLOWED_ORIGINS may not contain '*' outside dev")
 			}
 		}
+	}
+
+	// Half-configured is worse than unconfigured: the provider would be offered
+	// at checkout and then fail to authenticate its own callbacks, by which
+	// point the customer believes they have paid.
+	p := cfg.Billing.Payme
+	if (p.MerchantID == "") != (p.Key == "") {
+		l.errf("PAYME_MERCHANT_ID and PAYME_KEY must be set together, or neither")
+	}
+	if !cfg.IsDev() && p.Configured() && len(p.Key) < 16 {
+		l.errf("PAYME_KEY is %d characters, which is not a real merchant key", len(p.Key))
 	}
 
 	if err := l.err(); err != nil {

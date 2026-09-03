@@ -69,8 +69,8 @@ func newHarness(t *testing.T) *harness {
 	return &harness{
 		pool:        pool,
 		authSvc:     authSvc,
-		restaurants: service.NewRestaurant(store),
-		menus:       service.NewMenu(store),
+		restaurants: service.NewRestaurant(store, nil),
+		menus:       service.NewMenu(store, nil),
 	}
 }
 

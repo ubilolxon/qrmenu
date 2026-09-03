@@ -38,6 +38,7 @@ internal/storage object storage (S3/MinIO); the only package that knows a bucket
 internal/i18n    locale negotiation and fallback for translated fields
 internal/realtime  the SSE hub — one goroutine-safe registry per restaurant
 internal/ratelimit Redis token bucket for the unauthenticated write endpoints
+internal/billing   payment-provider abstraction; `payme/` is the Merchant API
 web/             SPA (separate build)
 deploy/          Dockerfile, docker-compose
 ```
@@ -74,8 +75,10 @@ matters is a query missing its scope, so:
 
 ## API
 
-Three surfaces: public (unauthenticated, cached), admin (`/api/v1/admin`, JWT),
-and staff (`/api/v1/staff`, JWT, long-lived SSE).
+Four surfaces: public (unauthenticated, cached), admin (`/api/v1/admin`, JWT),
+staff (`/api/v1/staff`, JWT, long-lived SSE), and `/webhooks` — payment-provider
+callbacks, outside `/api` so they are easy to exempt from CORS and rate limiting,
+and authenticated by each provider's own scheme rather than by JWT.
 
 ### Public
 
@@ -94,6 +97,7 @@ a person may have to type one.
 | GET | `/api/v1/public/t/{token}/orders` | this guest's orders here |
 | POST | `/api/v1/public/t/{token}/call-waiter` | `{"kind":"waiter"\|"bill"\|"help"}` |
 | GET | `/api/v1/public/orders/{orderID}` | one order, for the guest who placed it |
+| GET HEAD | `/api/v1/public/plans` | the pricing page: public plans, and which payment methods this deployment has credentials for |
 
 Item photos arrive in the payload as three sizes plus an intrinsic width, height
 and average colour. The page uses the last three to reserve the right box before
@@ -138,6 +142,16 @@ owner-only: it invalidates every code already printed for that table.
 | GET | `/restaurants/{id}` | bearer | owner, manager |
 | PATCH | `/restaurants/{id}` | bearer | owner, manager |
 | DELETE | `/restaurants/{id}` | bearer | owner |
+| GET | `/billing` | bearer | **owner** |
+| POST | `/billing/subscribe` | bearer | **owner** |
+| POST | `/billing/cancel` | bearer | **owner** |
+| GET | `/billing/invoices` | bearer | **owner** |
+| POST | `/billing/invoices/{id}/pay` | bearer | **owner** |
+| POST | `/billing/invoices/{id}/void` | bearer | **owner** |
+
+Billing is owner-only, and that is the whole role rule: someone who runs the menu
+does not thereby get to change what the account is paying, or mark its bills
+settled.
 
 Menu tree, all under `/restaurants/{restaurantID}` and all requiring owner or
 manager, except where noted.
@@ -271,6 +285,133 @@ limit would let the first table's rush silence the room. The limiter fails
 **open** — Redis is a cache here as everywhere else, and a restaurant unable to
 take any orders because a cache is down is worse than the spam it prevents.
 
+## Plans and billing
+
+A plan is pricing configuration, not code: the limits live in `plans.limits` as
+jsonb, so a new lever or a bespoke deal for one customer is a row change rather
+than a deploy. `free`, `basic` and `pro` ship in the billing migration, because a
+running system with no `free` plan has no valid state for a new tenant —
+registration would fail on the foreign key.
+
+**The rule everything else follows: limits are enforced on the write path only.**
+A tenant who downgrades, stops paying, or gets suspended keeps serving the menu a
+guest is scanning right now. The lever is that they cannot add anything new — not
+that the QR code stuck to their table goes dark. Nothing on the public menu path
+consults a plan at all.
+
+Enforced today, counted across the whole tenant rather than one restaurant:
+
+| Lever | Checked when |
+|---|---|
+| `restaurants` | creating a restaurant |
+| `menu_items` | creating an item |
+| `tables` | creating a table |
+| `locales` | creating a restaurant, or PATCHing its locale list |
+| `storage_mb` | reserving an image upload |
+| `orders_enabled` | a guest placing an order or calling a waiter |
+| `staff_users` | advertised on the plan; enforced when staff invites land |
+
+A refusal is **402** with `code: "PLAN_LIMIT"` and the numbers in `details`
+(`resource`, `limit`, `current`, `plan_code`), so the SPA can render "3 of 3 used"
+next to an upgrade button instead of parsing a sentence.
+
+The guest ordering path is the exception. A diner has no plan, no way to upgrade
+one, and no interest in why, so that refusal is rewritten as a plain **403 — "This
+table is not taking orders right now."** The real reason goes to the log, where
+the operator can find it. A 402 addressed to whoever owes the money is never
+addressed to the guest.
+
+Two concurrent creates can both read the same count and both pass, leaving a
+tenant one row over their limit. That is deliberate: serialising every write
+behind a lock on the subscription row costs far more than the outcome it prevents.
+
+**Subscription states**
+
+```
+trialing ──► active ──► past_due ──► suspended
+    │           │          │  ▲          │
+    │           │          │  └── grace ─┘
+    └───────────┴──────────┴──────────────► cancelled
+```
+
+`past_due` stays writable — it is the grace window, and locking an account the
+moment a card expires punishes the restaurant for a bank's timing. Suspension
+comes after, and freezes the tenant's own writes only.
+
+Every tenant has exactly one non-cancelled subscription, created at registration
+on the free plan and held by a partial unique index. Making "no subscription"
+impossible removes the branch that would otherwise have to be written — and got
+wrong — at every limit check.
+
+A daily sweep runs in every instance (the statements only ever move a row out of
+the state they select on, so two instances sweeping at once do the work once
+between them). It runs at startup too, or a deployment that was down over a
+weekend would leave every lapsed subscription active until the next tick.
+
+**Paying**
+
+`POST /billing/subscribe` raises an invoice and returns a checkout. It changes no
+plan — the plan moves when the money arrives, and the only things allowed to say
+that has happened are a provider callback verified against that provider's own
+credentials, or an owner marking the invoice paid by hand.
+
+Invoices snapshot the plan code, amount and currency, for the same reason order
+lines snapshot a dish name: what the customer was charged has to survive the next
+price change. Numbers are `INV-{year}-{seq}`, allocated as max+1 and made safe by
+a unique index, with a retry on collision — the same shape as the daily order
+number.
+
+An unchanged plan renews by extending the *current period end*, so a payment that
+lands two days late does not shorten the month the customer bought. Any other
+plan starts today: someone upgrading mid-month is paying to get the bigger plan
+now, not at the end of the one they are leaving. Downgrading to free takes effect
+immediately and raises no invoice.
+
+**Providers**
+
+```go
+type Provider interface {
+    Name() domain.PaymentProvider
+    Checkout(ctx, req CheckoutRequest) (CheckoutResult, error)
+    Webhook() http.Handler
+}
+```
+
+A provider talks to a `billing.Ledger`, which the service layer implements, so
+adding one means writing a file in `internal/billing` rather than threading a new
+dependency through the application. Only providers this deployment has
+credentials for are registered, so a missing secret means the method is not
+offered rather than offered and broken — and its webhook path 404s instead of
+accepting callbacks it cannot verify.
+
+`manual` is payment by human: a transfer that cleared, cash, a comped account. It
+ships in the MVP and stays afterwards, because every payment system eventually
+needs an override, and having one from the start means the first customer can be
+onboarded before any integration is finished. It has no webhook by design —
+settlement goes through the authenticated admin API so the payment carries which
+person recorded it.
+
+`payme` implements the Uzbek Merchant API at `POST /webhooks/payme`. Three things
+about it are worth knowing before touching that file:
+
+- **It is not a webhook.** Payme calls one endpoint with JSON-RPC and asks about a
+  transaction it names by id. Every method is a lookup by that id, so idempotency
+  is structural: `CreateTransaction` repeated returns the existing transaction,
+  and `PerformTransaction` repeated returns the existing settlement without
+  renewing anything. That last one is the failure the whole design exists to
+  prevent, and it has a test named after it.
+- **Amounts are in tiyin.** `internal/money` treats UZS as zero-decimal because
+  tiyin are defunct in every shop in the country, but Payme's API is denominated
+  in them anyway — so an amount crossing that boundary is multiplied by 100.
+  Getting it wrong is a hundredfold mischarge, hence `payme.TiyinPerSom`.
+- **Every reply is HTTP 200.** JSON-RPC carries its own error channel and Payme
+  reads the body, not the status; a 4xx is read as a transport failure and
+  retried forever.
+
+Authentication is HTTP Basic with the fixed username `Paycom`, compared in
+constant time on both halves. `click` and `stripe` are named in the schema and
+the provider enum but are not implemented.
+
 ## Image uploads
 
 Uploading is two steps, and the split is the point.
@@ -399,6 +540,25 @@ that at compile time, so the test executes the template and checks the output
 still ends in `</html>`. **Any change to `menu.gohtml` or the view model should
 be covered there**, or the failure mode is a truncated page nobody notices.
 
+`internal/domain/plan_test.go` pins the limit arithmetic without a plan table:
+that an absent jsonb key reads as "not allowed" rather than "unlimited", that the
+check is inclusive so a tenant holding exactly their limit may not add another,
+and that a suspended account is refused whatever room its plan has.
+
+`internal/billing/payme/payme_test.go` drives the real JSON-RPC endpoint over
+HTTP against a fake ledger that *counts settlements*. The assertion that matters
+is `TestPerformTwiceSettlesOnce`: a duplicated callback must leave that counter
+at one. It also pins the tiyin conversion by sending the stored amount unconverted
+and requiring a refusal — the hundredfold undercharge, caught in a test rather
+than in a reconciliation.
+
+`internal/service/billing_test.go` runs the whole paid path against a real
+Postgres, because neither half of a limit check can be faked: the count has to be
+a real count and the limits have to be the ones the migration seeded. It also
+holds the two rules the billing design is built around:
+`TestSuspensionFreezesWritesButNotReads`, and `TestGuestNeverSeesTheUpsell` —
+which asserts the diner's refusal mentions no plan, no price and no upgrade.
+
 `internal/domain/order_test.go` pins the pricing rules and the status machine
 without a database, because they are pure functions of (menu, cart) by design —
 that is what `domain.Catalog` exists for. `internal/realtime/hub_test.go` covers
@@ -421,4 +581,7 @@ blocking the publisher, and events crossing between restaurants. Run it with
 - **Phase 5** — table orders: server-side pricing, cart validation against the
   live menu, snapshotted line items, daily order numbers, idempotent placement,
   the status machine, waiter calls, and the staff SSE stream.
-- **Phase 6 next** — plans, limits and payment-provider webhooks.
+- **Phase 6** — plans, limits enforced on the write path, subscriptions and
+  invoices, the `manual` provider, the Payme Merchant API, and the daily expiry
+  sweep.
+- **Phase 7 next** — admin SPA, RLS backstop, metrics, load test, deploy.

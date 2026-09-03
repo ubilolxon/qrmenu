@@ -30,6 +30,7 @@ const (
 	CodeConflict     = "CONFLICT"
 	CodeValidation   = "VALIDATION_FAILED"
 	CodeRateLimited  = "RATE_LIMITED"
+	CodePlanLimit    = "PLAN_LIMIT"
 	CodeInternal     = "INTERNAL"
 	CodeUnavailable  = "SERVICE_UNAVAILABLE"
 )

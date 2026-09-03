@@ -11,11 +11,25 @@ import (
 )
 
 type Querier interface {
+	// Activate is the single path a paid subscription takes, whether the payment
+	// was a renewal, an upgrade or a downgrade.
+	//
+	// The new period starts at the old one's end when the plan is unchanged, so a
+	// payment that lands two days late does not shorten the month the customer
+	// bought. Any *other* plan starts now: someone upgrading mid-month is paying to
+	// get the bigger plan today, not at the end of the one they are leaving.
+	//
+	ActivateSubscription(ctx context.Context, arg ActivateSubscriptionParams) (Subscription, error)
 	// Bumping the version is how the public menu cache is invalidated: the counter
 	// is part of the cache key, so old entries are simply never read again and
 	// expire on their own. See Phase 3.
 	//
 	BumpMenuVersion(ctx context.Context, arg BumpMenuVersionParams) (int32, error)
+	// Cancellable from either state: a provider may reverse a payment it has
+	// already performed, which is a refund rather than an abandoned checkout, and
+	// the reason code is what tells the two apart.
+	//
+	CancelPaymentTransaction(ctx context.Context, arg CancelPaymentTransactionParams) (PaymentTransaction, error)
 	// Clears the current default so a new one can be set. The partial unique index
 	// allows only one default per item, so this must run first, in the same
 	// transaction.
@@ -30,6 +44,7 @@ type Querier interface {
 	// or deactivating the last owner cannot lock everyone out of billing.
 	//
 	CountActiveOwners(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	CountActiveUsersByTenant(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	CountImages(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	CountItemsByRestaurant(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	// Counts every item a tenant owns across all their restaurants. This is the
@@ -42,6 +57,10 @@ type Querier interface {
 	CountModifiersInGroup(ctx context.Context, arg CountModifiersInGroupParams) (int64, error)
 	CountRestaurants(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	CountTables(ctx context.Context, restaurantID uuid.UUID) (int64, error)
+	// Usage counters the limit checks compare against. Each one counts what the
+	// corresponding plan lever caps, across the whole tenant rather than one
+	// restaurant, because that is the unit a plan is sold in.
+	CountTablesByTenant(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	CreateCategory(ctx context.Context, arg CreateCategoryParams) (Category, error)
 	// The row is created before the bytes exist, so the client can be handed a
 	// presigned URL to upload to. It stays 'pending' until the server has fetched
@@ -53,6 +72,7 @@ type Querier interface {
 	// and every prefix-based delete would then silently orphan the original.
 	//
 	CreateImage(ctx context.Context, arg CreateImageParams) (Image, error)
+	CreateInvoice(ctx context.Context, arg CreateInvoiceParams) (Invoice, error)
 	CreateItem(ctx context.Context, arg CreateItemParams) (Item, error)
 	// Every query in this file is scoped by restaurant_id. The service verifies the
 	// restaurant belongs to the caller's tenant before any of these run, so the two
@@ -62,8 +82,10 @@ type Querier interface {
 	CreateModifierGroup(ctx context.Context, arg CreateModifierGroupParams) (ModifierGroup, error)
 	CreateOrder(ctx context.Context, arg CreateOrderParams) (Order, error)
 	CreateOrderItem(ctx context.Context, arg CreateOrderItemParams) (OrderItem, error)
+	CreatePaymentTransaction(ctx context.Context, arg CreatePaymentTransactionParams) (PaymentTransaction, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateRestaurant(ctx context.Context, arg CreateRestaurantParams) (Restaurant, error)
+	CreateSubscription(ctx context.Context, arg CreateSubscriptionParams) (Subscription, error)
 	CreateTable(ctx context.Context, arg CreateTableParams) (RestaurantTable, error)
 	CreateTenant(ctx context.Context, name string) (Tenant, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
@@ -88,13 +110,30 @@ type Querier interface {
 	DeleteTable(ctx context.Context, arg DeleteTableParams) (int64, error)
 	DeleteUser(ctx context.Context, arg DeleteUserParams) (int64, error)
 	DeleteVariant(ctx context.Context, arg DeleteVariantParams) (int64, error)
+	// The first half of the daily sweep: a period that has run out stops being
+	// active. A subscription the customer already asked to end goes straight to
+	// cancelled and back to free; everything else gets the grace period.
+	//
+	ExpireSubscriptions(ctx context.Context) ([]Subscription, error)
 	// The dedupe lookup: a guest pressing the button again while the first call is
 	// still live gets that call back instead of adding a second row to the screen.
 	//
 	FindOpenWaiterCall(ctx context.Context, arg FindOpenWaiterCallParams) (WaiterCall, error)
 	GetCategory(ctx context.Context, arg GetCategoryParams) (Category, error)
+	// GetEntitlement is the query on the write path of every limit check, so it is
+	// one indexed lookup and one primary-key join rather than two round trips.
+	//
+	GetEntitlement(ctx context.Context, tenantID uuid.UUID) (GetEntitlementRow, error)
 	GetImage(ctx context.Context, arg GetImageParams) (Image, error)
+	GetInvoice(ctx context.Context, arg GetInvoiceParams) (Invoice, error)
+	// GetInvoiceByID is deliberately not tenant-scoped: a payment provider knows
+	// only the invoice id it was handed at checkout, and has no tenant context to
+	// offer. Never call it from a request handler — use GetInvoice, which takes
+	// the tenant.
+	//
+	GetInvoiceByID(ctx context.Context, id uuid.UUID) (Invoice, error)
 	GetItem(ctx context.Context, arg GetItemParams) (Item, error)
+	GetLivePaymentTransaction(ctx context.Context, invoiceID uuid.UUID) (PaymentTransaction, error)
 	GetMenu(ctx context.Context, arg GetMenuParams) (Menu, error)
 	GetModifier(ctx context.Context, arg GetModifierParams) (Modifier, error)
 	GetModifierGroup(ctx context.Context, arg GetModifierGroupParams) (ModifierGroup, error)
@@ -112,6 +151,8 @@ type Querier interface {
 	// patching another tenant's order by pasting an id.
 	//
 	GetOrderForTenant(ctx context.Context, arg GetOrderForTenantParams) (GetOrderForTenantRow, error)
+	GetPaymentTransaction(ctx context.Context, arg GetPaymentTransactionParams) (PaymentTransaction, error)
+	GetPlan(ctx context.Context, code string) (Plan, error)
 	// Looked up by hash, never by the token itself — only the SHA-256 is stored.
 	//
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (RefreshToken, error)
@@ -121,6 +162,10 @@ type Querier interface {
 	// nothing for an inactive restaurant so a suspended account goes dark.
 	//
 	GetRestaurantBySlug(ctx context.Context, slug string) (Restaurant, error)
+	// A tenant has exactly one non-cancelled subscription, held by
+	// subscriptions_tenant_live_uniq, so this can never return two rows.
+	//
+	GetSubscription(ctx context.Context, tenantID uuid.UUID) (Subscription, error)
 	GetTable(ctx context.Context, arg GetTableParams) (RestaurantTable, error)
 	// GetTableByToken serves the public request. Unscoped by design: the token is
 	// the guest's only identifier, and it is unguessable. The join brings the
@@ -149,6 +194,7 @@ type Querier interface {
 	ListCategoriesByRestaurant(ctx context.Context, restaurantID uuid.UUID) ([]Category, error)
 	ListGuestOrders(ctx context.Context, arg ListGuestOrdersParams) ([]Order, error)
 	ListImages(ctx context.Context, arg ListImagesParams) ([]Image, error)
+	ListInvoices(ctx context.Context, arg ListInvoicesParams) ([]Invoice, error)
 	ListItems(ctx context.Context, arg ListItemsParams) ([]Item, error)
 	// Loads every item for a restaurant in one scan. Phase 3 builds the whole
 	// public menu payload from queries like this rather than per-category round
@@ -184,6 +230,9 @@ type Querier interface {
 	//
 	ListOrderableItems(ctx context.Context, arg ListOrderableItemsParams) ([]ListOrderableItemsRow, error)
 	ListOrdersByDay(ctx context.Context, arg ListOrdersByDayParams) ([]Order, error)
+	ListPaymentTransactionsByRange(ctx context.Context, arg ListPaymentTransactionsByRangeParams) ([]PaymentTransaction, error)
+	ListPlans(ctx context.Context) ([]Plan, error)
+	ListPublicPlans(ctx context.Context) ([]Plan, error)
 	// ListReadyImages feeds the public menu. Only 'ready' rows are returned, so a
 	// pending or failed upload can never reach a guest's page.
 	//
@@ -208,6 +257,12 @@ type Querier interface {
 	// a no-success would report a spurious failure for a retry that in fact worked.
 	//
 	MarkImageReady(ctx context.Context, arg MarkImageReadyParams) (Image, error)
+	// Compare-and-set from 'open': a provider that delivers the same success
+	// callback twice marks the invoice paid once, and the second attempt returns
+	// no rows rather than re-running the renewal behind it.
+	//
+	MarkInvoicePaid(ctx context.Context, arg MarkInvoicePaidParams) (Invoice, error)
+	NextInvoiceNumber(ctx context.Context) (NextInvoiceNumberRow, error)
 	// Orders, their lines, and the waiter-call button.
 	// Allocates the next daily order number, and reports the restaurant's own
 	// clock in the same round trip.
@@ -225,6 +280,7 @@ type Querier interface {
 	// safe, and the service retries.
 	//
 	NextOrderCode(ctx context.Context, arg NextOrderCodeParams) (NextOrderCodeRow, error)
+	PerformPaymentTransaction(ctx context.Context, arg PerformPaymentTransactionParams) (PaymentTransaction, error)
 	ReorderCategories(ctx context.Context, arg ReorderCategoriesParams) (int64, error)
 	ReorderItems(ctx context.Context, arg ReorderItemsParams) (int64, error)
 	// Bulk reorder in one round trip. The array's order IS the new order --
@@ -245,11 +301,28 @@ type Querier interface {
 	// code leaks or a table is reassigned.
 	//
 	RotateTableToken(ctx context.Context, arg RotateTableTokenParams) (RestaurantTable, error)
+	// Moving to the free plan is its own statement rather than a zero-month
+	// activation: a free plan has no period at all, and expressing "never expires"
+	// as an interval of zero would make it expire immediately.
+	//
+	SetFreePlan(ctx context.Context, id uuid.UUID) (Subscription, error)
+	SetInvoiceStatus(ctx context.Context, arg SetInvoiceStatusParams) (Invoice, error)
 	// Flipping availability is the single most frequent menu write — a dish runs
 	// out mid-service — so it gets its own narrow query rather than a full update.
 	//
 	SetItemAvailability(ctx context.Context, arg SetItemAvailabilityParams) (Item, error)
+	SetSubscriptionCancelAtPeriodEnd(ctx context.Context, arg SetSubscriptionCancelAtPeriodEndParams) (Subscription, error)
+	SetSubscriptionStatus(ctx context.Context, arg SetSubscriptionStatusParams) (Subscription, error)
 	SetUserActive(ctx context.Context, arg SetUserActiveParams) (User, error)
+	// Storage counts only images that made it to 'ready': a pending row has no
+	// bytes in the bucket yet, and a failed one had its object removed.
+	//
+	SumImageBytesByTenant(ctx context.Context, tenantID uuid.UUID) (int64, error)
+	// The second half: an unpaid subscription that has also used up its grace is
+	// suspended. Suspension freezes the tenant's own writes; it does not touch the
+	// public menu or a guest's order in progress.
+	//
+	SuspendPastDueSubscriptions(ctx context.Context, graceSeconds float64) ([]Subscription, error)
 	TouchUserLastLogin(ctx context.Context, id uuid.UUID) error
 	UpdateCategory(ctx context.Context, arg UpdateCategoryParams) (Category, error)
 	UpdateItem(ctx context.Context, arg UpdateItemParams) (Item, error)

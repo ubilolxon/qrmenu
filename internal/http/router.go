@@ -36,6 +36,8 @@ type Deps struct {
 	Tables      *service.Table
 	Images      *service.Image
 	Orders      *service.Order
+	Plans       *service.Plan
+	BillingSvc  *service.Billing
 	Files       *storage.Client
 	Limiter     *ratelimit.Limiter
 	PublicPages handler.Public
@@ -91,6 +93,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/m/{slug}", d.PublicPages.MenuBySlug)
 			r.Get("/t/{token}", d.PublicPages.MenuByToken)
 
+			// The pricing page. Unauthenticated because someone deciding
+			// whether to sign up has no account yet, and private plans are
+			// filtered out in the query rather than here.
+			r.Get("/plans", handler.NewBilling(d.BillingSvc, d.Plans, d.Logger).Plans)
+
 			// Ordering hangs off the table token, never off a table id: the
 			// token is the only table identifier a guest ever sees, and it is
 			// unguessable, so there is nothing here to enumerate or spoof.
@@ -115,11 +122,20 @@ func NewRouter(d Deps) http.Handler {
 		})
 	})
 
-	// Payment provider callbacks. Signature-verified, never JWT-authenticated,
-	// and deliberately outside /api so they are easy to exempt from CORS and
-	// rate limiting. (Phase 6)
+	// Payment provider callbacks. Credential-verified by the provider's own
+	// scheme, never JWT-authenticated, and deliberately outside /api so they
+	// are easy to exempt from CORS and rate limiting.
+	//
+	// Only providers this deployment actually has credentials for are mounted,
+	// so an unconfigured provider answers 404 rather than accepting callbacks
+	// it cannot verify.
 	r.Route("/webhooks", func(r chi.Router) {
-		r.NotFound(notImplemented)
+		if d.BillingSvc != nil {
+			handler.MountWebhooks(func(pattern string, h http.Handler) {
+				r.Handle(pattern, h)
+			}, d.BillingSvc.Providers())
+		}
+		r.NotFound(func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
 	})
 
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
@@ -156,6 +172,13 @@ func (d Deps) mountAdmin(r chi.Router) {
 
 		r.Get("/me", authHandler.Me)
 
+		// Billing is the owner's, not the manager's: someone who runs the menu
+		// does not thereby get to change what the account is paying.
+		r.Route("/billing", func(r chi.Router) {
+			r.Use(middleware.RequireRole(domain.RoleOwner))
+			d.mountBilling(r)
+		})
+
 		r.Route("/restaurants", func(r chi.Router) {
 			// Managers run the menus; owners additionally control how many
 			// restaurants exist, since that is what a plan is billed on.
@@ -177,6 +200,26 @@ func (d Deps) mountAdmin(r chi.Router) {
 				mountImages(r, handler.NewImage(d.Images, d.Files))
 			})
 		})
+	})
+}
+
+// mountBilling is the owner's subscription and invoice surface.
+//
+// Nothing here changes a plan directly. Subscribe raises an invoice and hands
+// back a checkout; the plan moves when the money arrives, and the only things
+// allowed to say that are a provider callback verified against that provider's
+// credentials, or Pay — an owner recording a payment made outside any provider.
+func (d Deps) mountBilling(r chi.Router) {
+	h := handler.NewBilling(d.BillingSvc, d.Plans, d.Logger)
+
+	r.Get("/", h.Overview)
+	r.Post("/subscribe", h.Subscribe)
+	r.Post("/cancel", h.Cancel)
+
+	r.Route("/invoices", func(r chi.Router) {
+		r.Get("/", h.Invoices)
+		r.Post("/{invoiceID}/pay", h.Pay)
+		r.Post("/{invoiceID}/void", h.Void)
 	})
 }
 

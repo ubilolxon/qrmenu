@@ -35,11 +35,13 @@ import (
 type Image struct {
 	store  *postgres.Store
 	files  *storage.Client
+	plans  *Plan
 	logger *slog.Logger
 }
 
-func NewImage(store *postgres.Store, files *storage.Client, logger *slog.Logger) *Image {
-	return &Image{store: store, files: files, logger: logger}
+// plans may be nil, which permits everything. See service.Plan.
+func NewImage(store *postgres.Store, files *storage.Client, plans *Plan, logger *slog.Logger) *Image {
+	return &Image{store: store, files: files, plans: plans, logger: logger}
 }
 
 // UploadTTL is how long a presigned URL stays valid. Long enough for a slow
@@ -79,6 +81,13 @@ func (s *Image) CreateUpload(ctx context.Context, tenantID, restaurantID uuid.UU
 		return Upload{}, err
 	}
 	if err := in.Validate(); err != nil {
+		return Upload{}, err
+	}
+	// The declared size is what is checked, because the real one is not known
+	// until the bytes land. That makes this a first gate rather than the last
+	// word: a client that understates the size gets its presigned URL, and the
+	// complete step counts what actually arrived.
+	if err := s.plans.CheckStorage(ctx, tenantID, in.ByteSize); err != nil {
 		return Upload{}, err
 	}
 

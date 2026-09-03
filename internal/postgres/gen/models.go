@@ -40,6 +40,26 @@ type Image struct {
 	UploadedAt   *time.Time
 }
 
+type Invoice struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+	Number         string
+	Year           int32
+	Seq            int32
+	PlanCode       string
+	AmountMinor    int64
+	Currency       string
+	Status         string
+	PeriodStart    time.Time
+	PeriodEnd      time.Time
+	Provider       string
+	PaidAt         *time.Time
+	Memo           *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type Item struct {
 	ID           uuid.UUID
 	RestaurantID uuid.UUID
@@ -151,6 +171,37 @@ type OrderItem struct {
 	CreatedAt           time.Time
 }
 
+type PaymentTransaction struct {
+	ID            uuid.UUID
+	InvoiceID     uuid.UUID
+	TenantID      uuid.UUID
+	Provider      string
+	ProviderTxnID string
+	State         string
+	AmountMinor   int64
+	CreatedMs     int64
+	PerformedMs   *int64
+	CancelledMs   *int64
+	CancelReason  *int32
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type Plan struct {
+	Code            string
+	Name            json.RawMessage
+	Description     []byte
+	PriceMinor      int64
+	Currency        string
+	BillingInterval string
+	TrialDays       int32
+	Limits          json.RawMessage
+	IsPublic        bool
+	SortOrder       int32
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
 type RefreshToken struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
@@ -195,6 +246,21 @@ type RestaurantTable struct {
 	IsActive     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type Subscription struct {
+	ID                 uuid.UUID
+	TenantID           uuid.UUID
+	PlanCode           string
+	Status             string
+	Provider           string
+	ProviderRef        *string
+	CurrentPeriodStart time.Time
+	CurrentPeriodEnd   *time.Time
+	CancelAtPeriodEnd  bool
+	CancelledAt        *time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Tenant struct {

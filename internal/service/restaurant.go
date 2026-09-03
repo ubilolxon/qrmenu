@@ -16,10 +16,12 @@ import (
 
 type Restaurant struct {
 	store *postgres.Store
+	plans *Plan
 }
 
-func NewRestaurant(store *postgres.Store) *Restaurant {
-	return &Restaurant{store: store}
+// plans may be nil, which permits everything. See service.Plan.
+func NewRestaurant(store *postgres.Store, plans *Plan) *Restaurant {
+	return &Restaurant{store: store, plans: plans}
 }
 
 // Every method takes tenantID first and passes it into the query. This is the
@@ -30,6 +32,15 @@ func NewRestaurant(store *postgres.Store) *Restaurant {
 func (s *Restaurant) Create(ctx context.Context, tenantID uuid.UUID, in domain.RestaurantInput) (domain.Restaurant, error) {
 	in = normalizeRestaurantInput(in)
 	if err := in.Validate(); err != nil {
+		return domain.Restaurant{}, err
+	}
+
+	// Checked after validation, so a caller with a malformed payload is told
+	// what is wrong with it rather than being sent to the pricing page.
+	if err := s.plans.Check(ctx, tenantID, domain.ResourceRestaurants); err != nil {
+		return domain.Restaurant{}, err
+	}
+	if err := s.plans.CheckValue(ctx, tenantID, domain.ResourceLocales, len(in.Locales)); err != nil {
 		return domain.Restaurant{}, err
 	}
 
@@ -155,6 +166,16 @@ func (s *Restaurant) Update(ctx context.Context, tenantID, id uuid.UUID, patch R
 	merged = normalizeRestaurantInput(merged)
 	if err := merged.Validate(); err != nil {
 		return domain.Restaurant{}, err
+	}
+
+	// A PATCH replaces the locales array wholesale, so the question is whether
+	// the result is allowed, not whether one more may be added. Checked against
+	// the merged value for the same reason validation is: the patch alone does
+	// not say what the restaurant will end up with.
+	if patch.Locales != nil {
+		if err := s.plans.CheckValue(ctx, tenantID, domain.ResourceLocales, len(merged.Locales)); err != nil {
+			return domain.Restaurant{}, err
+		}
 	}
 
 	params := gen.UpdateRestaurantParams{ID: id, TenantID: tenantID}

@@ -22,7 +22,7 @@ import (
 func (h *harness) orderService(t *testing.T) (*service.Order, *realtime.Hub) {
 	t.Helper()
 	hub := realtime.New()
-	return service.NewOrder(postgres.NewStore(h.pool), hub, slog.New(slog.DiscardHandler)), hub
+	return service.NewOrder(postgres.NewStore(h.pool), hub, nil, slog.New(slog.DiscardHandler)), hub
 }
 
 // diner is a restaurant with one orderable dish and a table to order it from.
@@ -37,7 +37,7 @@ func (h *harness) diner(t *testing.T, tenantID uuid.UUID) diner {
 	ctx := context.Background()
 
 	built := h.tree(t, tenantID)
-	table, err := service.NewTable(postgres.NewStore(h.pool)).
+	table, err := service.NewTable(postgres.NewStore(h.pool), nil).
 		Create(ctx, tenantID, built.restaurantID, domain.TableInput{Label: "Stol " + uuid.NewString()[:8]})
 	if err != nil {
 		t.Fatalf("create table: %v", err)
@@ -516,7 +516,7 @@ func TestDeletingATableKeepsItsOrders(t *testing.T) {
 		t.Fatalf("place order: %v", err)
 	}
 
-	tables := service.NewTable(postgres.NewStore(h.pool))
+	tables := service.NewTable(postgres.NewStore(h.pool), nil)
 	if err := tables.Delete(ctx, tenantID, place.restaurantID, place.table.ID); err != nil {
 		t.Fatalf("delete table: %v", err)
 	}

@@ -93,6 +93,23 @@ func RenderError(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 
+	// Plan refusals carry the numbers behind them, so the details go out with
+	// the envelope: the SPA needs "3 of 3 used on the free plan" to render an
+	// upgrade prompt, and re-deriving that from a sentence is not something a
+	// client should have to do.
+	var limitErr *domain.LimitError
+	if errors.As(err, &limitErr) {
+		httperr.Write(w, http.StatusPaymentRequired, httperr.CodePlanLimit,
+			limitErr.Message(), limitErr)
+		return
+	}
+	var featureErr *domain.FeatureError
+	if errors.As(err, &featureErr) {
+		httperr.Write(w, http.StatusPaymentRequired, httperr.CodePlanLimit,
+			featureErr.Message(), featureErr)
+		return
+	}
+
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		httperr.Write(w, http.StatusNotFound, httperr.CodeNotFound,

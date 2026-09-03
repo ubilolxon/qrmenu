@@ -14,6 +14,8 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/ubilolxon/qrmenu/internal/auth"
+	"github.com/ubilolxon/qrmenu/internal/billing"
+	"github.com/ubilolxon/qrmenu/internal/billing/payme"
 	"github.com/ubilolxon/qrmenu/internal/cache"
 	"github.com/ubilolxon/qrmenu/internal/config"
 	apphttp "github.com/ubilolxon/qrmenu/internal/http"
@@ -101,13 +103,23 @@ func run() error {
 		return fmt.Errorf("build auth service: %w", err)
 	}
 
-	images := service.NewImage(store, files, logger)
+	// Plans is consulted on every write path that a plan puts a ceiling on, so
+	// it is built before the services that hold it.
+	plans := service.NewPlan(store)
+
+	// The billing service is also the ledger every payment provider talks to,
+	// and a provider needs that ledger to be constructed. So the service comes
+	// first and the registry is handed to it afterwards.
+	billingSvc := service.NewBilling(store, logger)
+	billingSvc.UseProviders(paymentProviders(cfg, billingSvc, logger))
+
+	images := service.NewImage(store, files, plans, logger)
 
 	// One hub per process. Every staff device connected to this instance
 	// subscribes to it; see internal/realtime for what running more than one
 	// instance would take.
 	hub := realtime.New()
-	orders := service.NewOrder(store, hub, logger)
+	orders := service.NewOrder(store, hub, plans, logger)
 
 	publicPages, err := handler.NewPublic(service.NewPublicMenu(store, rdb, logger, files), cfg.Public)
 	if err != nil {
@@ -122,11 +134,13 @@ func run() error {
 		Version:     version,
 		Issuer:      issuer,
 		AuthSvc:     authSvc,
-		Restaurants: service.NewRestaurant(store),
-		Menus:       service.NewMenu(store),
-		Tables:      service.NewTable(store),
+		Restaurants: service.NewRestaurant(store, plans),
+		Menus:       service.NewMenu(store, plans),
+		Tables:      service.NewTable(store, plans),
 		Images:      images,
 		Orders:      orders,
+		Plans:       plans,
+		BillingSvc:  billingSvc,
 		Files:       files,
 		Limiter:     ratelimit.New(rdb, logger),
 		PublicPages: publicPages,
@@ -136,7 +150,74 @@ func run() error {
 	// pending rows and orphaned objects, on a bill that only ever grows.
 	go sweepAbandonedUploads(ctx, images, logger)
 
+	// Subscriptions expire on a clock, not on a request, so something has to
+	// notice. This is that something.
+	go sweepSubscriptions(ctx, billingSvc, cfg.Billing, logger)
+
 	return apphttp.Serve(ctx, cfg.HTTP, logger, router)
+}
+
+// paymentProviders builds the set this deployment has credentials for.
+//
+// Manual is always present: every payment system eventually needs a human
+// override, and having one from the start means the first customer can be
+// onboarded before any provider integration is finished. Everything else
+// appears only when configured, so a missing secret means the method is not
+// offered rather than offered and broken.
+func paymentProviders(cfg config.Config, ledger billing.Ledger, logger *slog.Logger) *billing.Registry {
+	providers := []billing.Provider{
+		billing.Manual{Instructions: cfg.Billing.ManualInstructions},
+	}
+
+	if cfg.Billing.Payme.Configured() {
+		providers = append(providers, payme.New(payme.Config{
+			MerchantID:  cfg.Billing.Payme.MerchantID,
+			Key:         cfg.Billing.Payme.Key,
+			CheckoutURL: cfg.Billing.Payme.CheckoutURL,
+		}, ledger, logger))
+		logger.Info("payme provider configured",
+			slog.String("merchant_id", cfg.Billing.Payme.MerchantID))
+	} else {
+		logger.Info("payme is not configured; payment is by manual settlement only")
+	}
+
+	return billing.NewRegistry(providers...)
+}
+
+// sweepSubscriptions runs the expiry pass until shutdown.
+//
+// It runs once at startup as well as on the tick, because a deployment that was
+// down over a weekend would otherwise leave every lapsed subscription active
+// until the next interval came round.
+//
+// As with the upload sweep, every instance runs it. The statements are
+// idempotent — they only ever move a row out of the state they select on — so
+// two instances sweeping at once do the work once between them.
+func sweepSubscriptions(ctx context.Context, svc *service.Billing, cfg config.Billing, logger *slog.Logger) {
+	run := func() {
+		result, err := svc.Sweep(ctx, cfg.GracePeriod)
+		if err != nil {
+			logger.Warn("subscription sweep failed", slog.Any("error", err))
+			return
+		}
+		if result.Expired > 0 || result.Suspended > 0 {
+			logger.Info("subscription sweep",
+				slog.Int("expired", result.Expired), slog.Int("suspended", result.Suspended))
+		}
+	}
+	run()
+
+	ticker := time.NewTicker(cfg.SweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 // SweepInterval is how often abandoned uploads are cleared. Nothing depends on

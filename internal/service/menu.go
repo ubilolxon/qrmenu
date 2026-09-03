@@ -25,10 +25,12 @@ import (
 // restaurant's rows; step 2 alone would let any tenant name any restaurant.
 type Menu struct {
 	store *postgres.Store
+	plans *Plan
 }
 
-func NewMenu(store *postgres.Store) *Menu {
-	return &Menu{store: store}
+// plans may be nil, which permits everything. See service.Plan.
+func NewMenu(store *postgres.Store, plans *Plan) *Menu {
+	return &Menu{store: store, plans: plans}
 }
 
 // assertRestaurant is the tenant boundary for everything in this file.
@@ -416,6 +418,12 @@ func (s *Menu) CreateItem(ctx context.Context, tenantID, restaurantID uuid.UUID,
 	in.Tags = domain.NormalizeTags(in.Tags)
 	in.Allergens = domain.NormalizeTags(in.Allergens)
 	if err := in.Validate(); err != nil {
+		return domain.Item{}, err
+	}
+	// Counted across the tenant, not this restaurant: a plan is sold per
+	// account, so a chain cannot get around a 200-item ceiling by opening a
+	// second branch.
+	if err := s.plans.Check(ctx, tenantID, domain.ResourceMenuItems); err != nil {
 		return domain.Item{}, err
 	}
 

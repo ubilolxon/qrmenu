@@ -23,11 +23,13 @@ import (
 type Order struct {
 	store  *postgres.Store
 	hub    *realtime.Hub
+	plans  *Plan
 	logger *slog.Logger
 }
 
-func NewOrder(store *postgres.Store, hub *realtime.Hub, logger *slog.Logger) *Order {
-	return &Order{store: store, hub: hub, logger: logger}
+// plans may be nil, which permits everything. See service.Plan.
+func NewOrder(store *postgres.Store, hub *realtime.Hub, plans *Plan, logger *slog.Logger) *Order {
+	return &Order{store: store, hub: hub, plans: plans, logger: logger}
 }
 
 // Hub exposes the event registry to the SSE handler, which needs to subscribe
@@ -92,6 +94,14 @@ func (s *Order) Place(ctx context.Context, token, guestSessionID string, in Plac
 		return Placed{}, wrap("get table", err)
 	}
 	table, restaurant := row.RestaurantTable, row.Restaurant
+
+	// The only place billing touches a guest. Note what is *not* gated: the
+	// menu itself is served by a different path that never consults a plan, so
+	// a downgrade turns the table into a menu the guest can read rather than a
+	// QR code that fails.
+	if err := s.ordersEnabled(ctx, restaurant.TenantID); err != nil {
+		return Placed{}, err
+	}
 
 	if replayed, ok, err := s.replay(ctx, table.ID, in.IdempotencyKey); err != nil {
 		return Placed{}, err
@@ -283,6 +293,32 @@ func insertLine(ctx context.Context, q *gen.Queries, orderID, restaurantID uuid.
 
 func isOrderCodeCollision(err error) bool   { return conflictOn(err, "order number") }
 func isIdempotencyCollision(err error) bool { return conflictOn(err, "idempotency") }
+
+// ordersEnabled checks the plan, and rewrites the refusal for the person who
+// will read it.
+//
+// Everywhere else a plan refusal is shown to the account holder, so it names
+// the plan and offers an upgrade. Here the reader is a diner holding a phone:
+// they have no plan, no way to upgrade one, and no interest in why. So the
+// restaurant's billing state is translated into the only fact that concerns
+// them — this table does not take orders — and the reason is left in the log
+// where the operator can find it.
+func (s *Order) ordersEnabled(ctx context.Context, tenantID uuid.UUID) error {
+	err := s.plans.CheckFeature(ctx, tenantID, "table ordering",
+		func(l domain.Limits) bool { return l.OrdersEnabled })
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, domain.ErrPlanLimit) {
+		return err
+	}
+
+	s.logger.Info("ordering refused by plan", "tenant_id", tenantID, "reason", err)
+	// Forbidden rather than 402: "Payment Required" is addressed to whoever
+	// owes the money, and that is never the guest.
+	return domain.Errorf(domain.ErrForbidden,
+		"This table is not taking orders right now.")
+}
 
 func conflictOn(err error, marker string) bool {
 	var statusErr *domain.StatusError
@@ -590,6 +626,13 @@ func (s *Order) CallWaiter(ctx context.Context, token, guestSessionID string, ki
 		return Called{}, wrap("get table", err)
 	}
 	table, restaurant := row.RestaurantTable, row.Restaurant
+
+	// Gated on the same flag as ordering, and deliberately so: a call raised on
+	// a plan with no staff screen to receive it reaches nobody, and a button
+	// that silently does nothing is worse than one that is not offered.
+	if err := s.ordersEnabled(ctx, restaurant.TenantID); err != nil {
+		return Called{}, err
+	}
 
 	existing, err := s.store.FindOpenWaiterCall(ctx, gen.FindOpenWaiterCallParams{
 		TableID: &table.ID, Kind: string(kind),

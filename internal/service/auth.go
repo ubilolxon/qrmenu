@@ -109,7 +109,12 @@ func (s *Auth) Register(ctx context.Context, in RegisterInput, meta SessionMeta)
 		if err != nil {
 			return fmt.Errorf("create owner: %w", postgres.MapError(err))
 		}
-		return nil
+
+		// The free subscription is part of signup, not a later step: every
+		// limit check reads one, so a tenant without one is not a free-tier
+		// account but a broken row, and the transaction is the only place that
+		// can be guaranteed.
+		return EnsureSubscription(ctx, q, tenant.ID)
 	})
 	if err != nil {
 		return nil, err
