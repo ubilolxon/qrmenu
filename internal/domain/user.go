@@ -32,6 +32,29 @@ func (r Role) String() string { return string(r) }
 // AllRoles returns every role, for validation messages and admin UIs.
 func AllRoles() []Role { return slices.Clone(allRoles) }
 
+// manageableRoles is who may hand out which job.
+//
+// A manager runs the floor, so adding a waiter or a kitchen login is part of
+// that job — a restaurant hiring someone on a Friday should not have to find
+// the owner. Creating another manager, or an owner, is not: those two can
+// change what the account pays for, and that is the owner's decision.
+var manageableRoles = map[Role][]Role{
+	RoleOwner:   {RoleOwner, RoleManager, RoleWaiter, RoleKitchen},
+	RoleManager: {RoleWaiter, RoleKitchen},
+	RoleWaiter:  nil,
+	RoleKitchen: nil,
+}
+
+// RoleCanManageUser reports whether actor may create, change or deactivate a
+// user holding target.
+//
+// Both ends are checked at every call site, and that matters: a manager who may
+// create a waiter must also be unable to *promote* that waiter to owner, which
+// is a question about the new role rather than the old one.
+func RoleCanManageUser(actor, target Role) bool {
+	return slices.Contains(manageableRoles[actor], target)
+}
+
 type TenantStatus string
 
 const (

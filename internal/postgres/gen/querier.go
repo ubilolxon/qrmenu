@@ -55,6 +55,11 @@ type Querier interface {
 	// than the number of choices that actually exist.
 	//
 	CountModifiersInGroup(ctx context.Context, arg CountModifiersInGroupParams) (int64, error)
+	// Counts the owners a tenant would have left if this one user were excluded.
+	// Used to refuse the change that would leave an account with nobody able to
+	// reach its billing.
+	//
+	CountOtherActiveOwners(ctx context.Context, arg CountOtherActiveOwnersParams) (int64, error)
 	CountRestaurants(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	CountTables(ctx context.Context, restaurantID uuid.UUID) (int64, error)
 	// Usage counters the limit checks compare against. Each one counts what the
@@ -348,6 +353,11 @@ type Querier interface {
 	UpdateRestaurant(ctx context.Context, arg UpdateRestaurantParams) (Restaurant, error)
 	UpdateTable(ctx context.Context, arg UpdateTableParams) (RestaurantTable, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
+	// Partial update: a NULL argument means "leave this alone", the same shape the
+	// restaurant and menu updates use.
+	//
+	UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error)
+	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error)
 	UpdateVariant(ctx context.Context, arg UpdateVariantParams) (ItemVariant, error)
 	// Same compare-and-set shape as orders, for the same reason.
 	//

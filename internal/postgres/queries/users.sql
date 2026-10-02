@@ -45,3 +45,26 @@ WHERE tenant_id = $1 AND role = 'owner' AND is_active;
 
 -- name: DeleteUser :execrows
 DELETE FROM users WHERE id = $1 AND tenant_id = $2;
+
+-- Partial update: a NULL argument means "leave this alone", the same shape the
+-- restaurant and menu updates use.
+--
+-- name: UpdateUser :one
+UPDATE users
+SET name = COALESCE(sqlc.narg(name)::text, name),
+    role = COALESCE(sqlc.narg(role)::text, role)
+WHERE id = sqlc.arg(id) AND tenant_id = sqlc.arg(tenant_id)
+RETURNING *;
+
+-- name: UpdateUserPassword :execrows
+UPDATE users
+SET password_hash = sqlc.arg(password_hash)
+WHERE id = sqlc.arg(id);
+
+-- Counts the owners a tenant would have left if this one user were excluded.
+-- Used to refuse the change that would leave an account with nobody able to
+-- reach its billing.
+--
+-- name: CountOtherActiveOwners :one
+SELECT count(*) FROM users
+WHERE tenant_id = $1 AND role = 'owner' AND is_active AND id <> $2;

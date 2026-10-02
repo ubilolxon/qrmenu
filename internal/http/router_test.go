@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -287,6 +288,69 @@ func TestBillingRoutesAreOwnerOnly(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Staff management decides who can sign in and what they may do, so the role
+// rules on the routes are load-bearing. The nil service in testRouter is what
+// makes this strong — anything that gets past the middleware panics.
+func TestUserRoutesEnforceRoles(t *testing.T) {
+	userID := uuid.NewString()
+
+	tests := []struct {
+		method, path string
+		// allowed lists every role that should reach the handler; everyone else
+		// must get a 403.
+		allowed []domain.Role
+	}{
+		{http.MethodGet, "/api/v1/admin/users/", []domain.Role{domain.RoleOwner, domain.RoleManager}},
+		{http.MethodPost, "/api/v1/admin/users/", []domain.Role{domain.RoleOwner, domain.RoleManager}},
+		{http.MethodGet, "/api/v1/admin/users/" + userID + "/", []domain.Role{domain.RoleOwner, domain.RoleManager}},
+		{http.MethodPatch, "/api/v1/admin/users/" + userID + "/", []domain.Role{domain.RoleOwner, domain.RoleManager}},
+		{http.MethodPut, "/api/v1/admin/users/" + userID + "/active", []domain.Role{domain.RoleOwner, domain.RoleManager}},
+		// Deleting an account and taking one over are owner-only: they are not
+		// changes to what someone may do, they are changes to who has access.
+		{http.MethodDelete, "/api/v1/admin/users/" + userID + "/", []domain.Role{domain.RoleOwner}},
+		{http.MethodPut, "/api/v1/admin/users/" + userID + "/password", []domain.Role{domain.RoleOwner}},
+	}
+
+	for _, tc := range tests {
+		t.Run("anonymous "+tc.method+" "+tc.path, func(t *testing.T) {
+			resp := do(t, testRouter(t), tc.method, tc.path, nil)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+
+		for _, role := range []domain.Role{domain.RoleOwner, domain.RoleManager, domain.RoleWaiter, domain.RoleKitchen} {
+			if slices.Contains(tc.allowed, role) {
+				continue
+			}
+			t.Run(string(role)+" "+tc.method+" "+tc.path, func(t *testing.T) {
+				resp := do(t, testRouter(t), tc.method, tc.path, bearer(tokenFor(t, role)))
+				if resp.StatusCode != http.StatusForbidden {
+					t.Errorf("status = %d, want 403 for role %s", resp.StatusCode, role)
+				}
+			})
+		}
+	}
+}
+
+// Changing your own password is not staff management: every role has one, so
+// it must not sit behind the owner/manager group.
+func TestEveryRoleCanChangeTheirOwnPassword(t *testing.T) {
+	resp := do(t, testRouter(t), http.MethodPut, "/api/v1/admin/me/password", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("anonymous status = %d, want 401", resp.StatusCode)
+	}
+
+	// Authenticated as a kitchen account, the role middleware must not refuse
+	// it. The nil service then panics, which the recoverer turns into a 500 —
+	// so anything other than 403 proves the route is reachable.
+	resp = do(t, testRouter(t), http.MethodPut, "/api/v1/admin/me/password",
+		bearer(tokenFor(t, domain.RoleKitchen)))
+	if resp.StatusCode == http.StatusForbidden {
+		t.Error("a kitchen account was refused its own password change")
 	}
 }
 

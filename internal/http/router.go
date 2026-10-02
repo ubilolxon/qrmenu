@@ -37,6 +37,7 @@ type Deps struct {
 	Tables      *service.Table
 	Images      *service.Image
 	Orders      *service.Order
+	Users       *service.User
 	Plans       *service.Plan
 	BillingSvc  *service.Billing
 	Files       *storage.Client
@@ -179,6 +180,7 @@ func NewRouter(d Deps) http.Handler {
 func (d Deps) mountAdmin(r chi.Router) {
 	authHandler := handler.NewAuth(d.AuthSvc, d.Config.Auth, d.Limiter)
 	restaurants := handler.NewRestaurant(d.Restaurants)
+	users := handler.NewUser(d.Users)
 
 	// Unauthenticated: these are how a caller obtains credentials in the first
 	// place. Refresh and logout authenticate with the HttpOnly cookie.
@@ -193,6 +195,13 @@ func (d Deps) mountAdmin(r chi.Router) {
 		r.Use(middleware.Authenticate(d.Issuer))
 
 		r.Get("/me", authHandler.Me)
+		// Changing your own password is not staff management, so it sits here
+		// rather than behind the owner-only group below: every role has one.
+		r.Put("/me/password", users.ChangePassword)
+
+		r.Route("/users", func(r chi.Router) {
+			d.mountUsers(r)
+		})
 
 		// Billing is the owner's, not the manager's: someone who runs the menu
 		// does not thereby get to change what the account is paying.
@@ -222,6 +231,32 @@ func (d Deps) mountAdmin(r chi.Router) {
 				mountImages(r, handler.NewImage(d.Images, d.Files))
 			})
 		})
+	})
+}
+
+// mountUsers is staff management.
+//
+// A manager reaches it, which is the point: hiring a waiter on a Friday should
+// not require finding the owner. What a manager may *do* is narrower than what
+// they may see, and that is enforced per role in domain.RoleCanManageUser
+// rather than here — a route cannot express "may create a waiter but not an
+// owner", and the interesting rules are about the pair of roles involved.
+//
+// Resetting someone else's password is owner-only even so. It is the one action
+// that hands over an account rather than changing what it may do.
+func (d Deps) mountUsers(r chi.Router) {
+	h := handler.NewUser(d.Users)
+	staffAdmins := middleware.RequireRole(domain.RoleOwner, domain.RoleManager)
+
+	r.With(staffAdmins).Get("/", h.List)
+	r.With(staffAdmins).Post("/", h.Create)
+
+	r.Route("/{userID}", func(r chi.Router) {
+		r.With(staffAdmins).Get("/", h.Get)
+		r.With(staffAdmins).Patch("/", h.Update)
+		r.With(staffAdmins).Put("/active", h.SetActive)
+		r.With(middleware.RequireRole(domain.RoleOwner)).Delete("/", h.Delete)
+		r.With(middleware.RequireRole(domain.RoleOwner)).Put("/password", h.ResetPassword)
 	})
 }
 

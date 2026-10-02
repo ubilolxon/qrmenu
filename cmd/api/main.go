@@ -163,6 +163,7 @@ func run() error {
 		Tables:      service.NewTable(store, plans),
 		Images:      images,
 		Orders:      orders,
+		Users:       service.NewUser(store, plans),
 		Plans:       plans,
 		BillingSvc:  billingSvc,
 		Files:       files,

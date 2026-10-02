@@ -139,6 +139,12 @@ owner-only: it invalidates every code already printed for that table.
 | POST | `/auth/refresh` | refresh cookie | rotates the token |
 | POST | `/auth/logout` | refresh cookie | revokes the session family |
 | GET | `/me` | bearer | any |
+| PUT | `/me/password` | bearer | **any** — change your own |
+| GET POST | `/users` | bearer | owner, manager |
+| GET PATCH | `/users/{id}` | bearer | owner, manager |
+| PUT | `/users/{id}/active` | bearer | owner, manager |
+| DELETE | `/users/{id}` | bearer | **owner** |
+| PUT | `/users/{id}/password` | bearer | **owner** — reset someone else's |
 | GET | `/restaurants` | bearer | owner, manager |
 | POST | `/restaurants` | bearer | owner |
 | GET | `/restaurants/{id}` | bearer | owner, manager |
@@ -286,6 +292,55 @@ rather than per IP: everyone in the restaurant shares one NAT address, so an IP
 limit would let the first table's rush silence the room. The limiter fails
 **open** — Redis is a cache here as everywhere else, and a restaurant unable to
 take any orders because a cache is down is worse than the spam it prevents.
+
+## Staff accounts
+
+Registration creates one login: the owner. Everything else is created here —
+and until it existed the whole staff surface was theoretical, because the
+kitchen screen and the order board are built for a kitchen and a waiter and
+there was no way to make either.
+
+**There is no email invitation**, because there is no mail infrastructure. The
+owner or manager sets an initial password and hands it over; the member
+replaces it with `PUT /me/password`, which also ends every other session they
+hold. `PUT /users/{id}/password` is the forgotten-password path, owner-only —
+with no self-service reset, the alternative is an account nobody can get back
+into.
+
+**Who may manage whom** is a rule about the *pair* of roles, not a ranking, and
+it lives in `domain.RoleCanManageUser`:
+
+| Actor | May create / change / deactivate |
+|---|---|
+| owner | owner, manager, waiter, kitchen |
+| manager | waiter, kitchen |
+| waiter, kitchen | nobody |
+
+A manager can hire floor staff, because a restaurant taking someone on at
+Friday lunchtime should not have to find the owner. A manager cannot create or
+promote to owner or manager: those two decide what the account pays for.
+
+Both ends of the pair are checked on every change. Checking only the target
+role would let a manager promote a waiter to owner; checking only the current
+one would let them promote a waiter to manager. Three further refusals exist
+because each is a distinct way to lock an account out or escalate:
+
+- **You cannot change your own role**, or the table above is a one-request
+  detour.
+- **You cannot deactivate or delete yourself.**
+- **You cannot remove the last active owner** — by demotion, deactivation or
+  deletion. An account with no owner has nobody who can reach its billing, add
+  staff, or undo the mistake.
+
+Deactivating is almost always right where deleting is wrong: a waiter who
+leaves should stop being able to sign in, but the orders they accepted still
+name them. Deactivating **revokes every session they hold**, in the same
+transaction as the flag, so a disabled account cannot be left with a live
+token. A deactivated member also stops counting against the plan, so replacing
+someone does not need an upgrade.
+
+This is where the `staff_users` plan limit is finally enforced — it was
+advertised on every plan from Phase 6 and had no write path to apply to.
 
 ## Plans and billing
 
@@ -719,6 +774,12 @@ holds the two rules the billing design is built around:
 `TestSuspensionFreezesWritesButNotReads`, and `TestGuestNeverSeesTheUpsell` —
 which asserts the diner's refusal mentions no plan, no price and no upgrade.
 
+`internal/service/user_test.go` covers staff management, where the interesting
+cases are all lockouts and escalations: a manager promoting a waiter — or
+themselves — to owner, and the three separate routes to removing the last
+active owner (demote, deactivate, delete), each of which is its own code path
+to the same dead account.
+
 `internal/service/rls_test.go` is the one that keeps the backstop honest. It
 creates an unprivileged role, connects as it, and runs a query with **no tenant
 predicate at all** — the shape of a forgotten `WHERE` — asserting it comes back
@@ -763,4 +824,7 @@ blocking the publisher, and events crossing between restaurants. Run it with
   pretend, Prometheus metrics on a separate listener, login and public-read rate
   limits, tenant/user on every log line, shutdown that drains writes and drops
   streams, and a load test.
+- **Staff accounts** — create, manage and deactivate waiter, kitchen and
+  manager logins; self-service password change; the `staff_users` plan limit
+  enforced at last.
 - **Next** — the admin SPA, and deployment.

@@ -25,6 +25,26 @@ func (q *Queries) CountActiveOwners(ctx context.Context, tenantID uuid.UUID) (in
 	return count, err
 }
 
+const countOtherActiveOwners = `-- name: CountOtherActiveOwners :one
+SELECT count(*) FROM users
+WHERE tenant_id = $1 AND role = 'owner' AND is_active AND id <> $2
+`
+
+type CountOtherActiveOwnersParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+// Counts the owners a tenant would have left if this one user were excluded.
+// Used to refuse the change that would leave an account with nobody able to
+// reach its billing.
+func (q *Queries) CountOtherActiveOwners(ctx context.Context, arg CountOtherActiveOwnersParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOtherActiveOwners, arg.TenantID, arg.ID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (tenant_id, email, password_hash, name, role)
 VALUES ($1, $2, $3, $4, $5)
@@ -234,4 +254,63 @@ UPDATE users SET last_login_at = now() WHERE id = $1
 func (q *Queries) TouchUserLastLogin(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, touchUserLastLogin, id)
 	return err
+}
+
+const updateUser = `-- name: UpdateUser :one
+UPDATE users
+SET name = COALESCE($1::text, name),
+    role = COALESCE($2::text, role)
+WHERE id = $3 AND tenant_id = $4
+RETURNING id, tenant_id, email, password_hash, name, role, is_active, last_login_at, created_at, updated_at
+`
+
+type UpdateUserParams struct {
+	Name     *string
+	Role     *string
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+// Partial update: a NULL argument means "leave this alone", the same shape the
+// restaurant and menu updates use.
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateUser,
+		arg.Name,
+		arg.Role,
+		arg.ID,
+		arg.TenantID,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.Name,
+		&i.Role,
+		&i.IsActive,
+		&i.LastLoginAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateUserPassword = `-- name: UpdateUserPassword :execrows
+UPDATE users
+SET password_hash = $1
+WHERE id = $2
+`
+
+type UpdateUserPasswordParams struct {
+	PasswordHash string
+	ID           uuid.UUID
+}
+
+func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserPassword, arg.PasswordHash, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
