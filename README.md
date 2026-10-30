@@ -3,7 +3,25 @@
 QR code menu SaaS for restaurants. Go API (JSON) + separate SPA, PostgreSQL,
 shared-table multi-tenancy.
 
-Full architecture and build plan: `~/work/summary_files/qr-menu-saas-architecture.md`
+Original architecture and build plan: [docs/architecture.md](docs/architecture.md)
+
+## Status
+
+**Backend: phases 0–7 complete.**
+
+- Tenants, users, JWT auth with rotating refresh tokens, roles, staff accounts
+- Menus, categories, items, variants, modifiers, multi-language fields
+- Tables, QR codes (PNG, SVG, printable table tent), public menu pages
+- Image uploads to S3/MinIO with server-side verification and resizing
+- Table orders with a status machine, waiter calls, live staff stream over SSE
+- Plans, limit enforcement, invoices, Payme Merchant API
+- Postgres RLS backstop, Prometheus metrics, Redis rate limits,
+  graceful shutdown, load test
+
+**Not built yet:** the admin SPA (`web/` is empty). The API is usable today
+via curl, and the guest menu pages are server-rendered HTML.
+
+**Next:** admin frontend, then a public demo deployment.
 
 ## Quick start
 
