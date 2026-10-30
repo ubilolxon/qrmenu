@@ -18,10 +18,14 @@ Original architecture and build plan: [docs/architecture.md](docs/architecture.m
 - Postgres RLS backstop, Prometheus metrics, Redis rate limits,
   graceful shutdown, load test
 
-**Not built yet:** the admin SPA (`web/` is empty). The API is usable today
-via curl, and the guest menu pages are server-rendered HTML.
+**Admin SPA (`web/`): first version.** React + TypeScript. Sign-in, restaurants,
+menu editor with photos, tables with printable QR codes, and a live order board
+over SSE. See [web/README.md](web/README.md).
 
-**Next:** admin frontend, then a public demo deployment.
+**Not built yet:** variants/modifiers, staff and billing screens in the SPA; a
+public demo deployment.
+
+**Next:** the remaining SPA screens, then deployment.
 
 ## Quick start
 
@@ -30,6 +34,7 @@ cp .env.example .env
 make up          # postgres :5433, redis :6379, minio :9000 (console :9001)
 make migrate     # apply schema
 make run         # API on :8080
+cd web && npm install && npm run dev   # admin SPA on :5173
 ```
 
 ```bash
@@ -59,7 +64,7 @@ internal/realtime  the SSE hub — one goroutine-safe registry per restaurant
 internal/ratelimit Redis token bucket for the unauthenticated write endpoints
 internal/billing   payment-provider abstraction; `payme/` is the Merchant API
 internal/metrics   Prometheus instrumentation; the costly numbers are pulled, not pushed
-web/             SPA (separate build)
+web/             admin SPA — React + Vite, see web/README.md
 deploy/          Dockerfile, docker-compose
 ```
 
